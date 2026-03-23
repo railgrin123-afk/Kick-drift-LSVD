@@ -107,11 +107,11 @@ SParams.S_CLIP_MAX        = 6.0;   % color scale upper cap for display (avoid hu
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
 SParams.SHOW_ONLY_THR_CONTOUR = true;
 
-% Custom colormap: blue -> yellow (no cyan/teal)
+% Custom colormap: cyan -> yellow
 nCmap = 256;
-cmap_blue_yellow = [linspace(0.55, 1, nCmap)', ...
-                    linspace(0.55, 1, nCmap)', ...
-                    linspace(1.0,  0, nCmap)'];   % [light blue] -> [yellow]
+cmap_blue_yellow = [linspace(0,   1, nCmap)', ...
+                    linspace(0.8, 1, nCmap)', ...
+                    linspace(0.8, 0, nCmap)'];   % [cyan] -> [yellow]
 
 % -------------------- YELLOW -> BLUE transitions (NEW OVERLAY) --------------------
 % "orange" means: S was > 2 last cycle, now S <= 2
