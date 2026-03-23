@@ -807,58 +807,35 @@ maskFine = isfinite(Sfine);
 Sfine(Sfine < 1) = 1;
 Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 
-% ---- FINAL-location S-field (scatter -> grid) ----
-% Scatter S values onto the full-res grid at their final positions
-Sfine_final = nan(H, W);
-wgrid       = zeros(H, W);   % accumulator for weighted average
+% ---- FINAL-location S-field (scattered interpolation) ----
+% Each coarse probe started at (xs(ix), ys(iy)) and ended at
+% (finalX, finalY).  We have its S value.  Now we want S on a regular
+% grid indexed by the FINAL (current) coordinates.
 
 validC = maskC & isfinite(Scoarse);
 Svals  = Scoarse(validC);
-fxVals = finalX_coarse(validC);
-fyVals = finalY_coarse(validC);
+fxVals = finalX_coarse(validC);   % 1-based x of final position
+fyVals = finalY_coarse(validC);   % 1-based y of final position
 
-% Deposit each coarse S value at its final pixel (bilinear splat)
-for k = 1:numel(Svals)
-    fx = fxVals(k);
-    fy = fyVals(k);
-    sv = Svals(k);
+if numel(Svals) >= 4
+    % Use scatteredInterpolant for smooth coverage of the full grid
+    F_interp = scatteredInterpolant(fxVals(:), fyVals(:), Svals(:), 'natural', 'nearest');
 
-    % bilinear corners (1-based pixel coords)
-    ix0 = floor(fx);  ix1 = ix0 + 1;
-    iy0 = floor(fy);  iy1 = iy0 + 1;
-    wx  = fx - ix0;   wy  = fy - iy0;
+    [Xf, Yf] = meshgrid(1:W, 1:H);
+    Sfine_final = F_interp(Xf, Yf);
 
-    % wrap to [1, W] and [1, H]
-    ix0 = mod(ix0-1, W) + 1;  ix1 = mod(ix1-1, W) + 1;
-    iy0 = mod(iy0-1, H) + 1;  iy1 = mod(iy1-1, H) + 1;
+    % Smooth lightly to remove interpolation noise
+    maskF_raw = isfinite(Sfine_final);
+    Sfine_final = smooth2_gaussian_nan(Sfine_final, maskF_raw, P.FIELD_SMOOTH_SIG);
+    maskFine_final = isfinite(Sfine_final);
 
-    w00 = (1-wx)*(1-wy);  w01 = wx*(1-wy);
-    w10 = (1-wx)*wy;      w11 = wx*wy;
-
-    Sfine_final(iy0,ix0) = nansum_pair(Sfine_final(iy0,ix0), sv*w00);
-    Sfine_final(iy0,ix1) = nansum_pair(Sfine_final(iy0,ix1), sv*w01);
-    Sfine_final(iy1,ix0) = nansum_pair(Sfine_final(iy1,ix0), sv*w10);
-    Sfine_final(iy1,ix1) = nansum_pair(Sfine_final(iy1,ix1), sv*w11);
-
-    wgrid(iy0,ix0) = wgrid(iy0,ix0) + w00;
-    wgrid(iy0,ix1) = wgrid(iy0,ix1) + w01;
-    wgrid(iy1,ix0) = wgrid(iy1,ix0) + w10;
-    wgrid(iy1,ix1) = wgrid(iy1,ix1) + w11;
+    % Clip for display
+    Sfine_final(Sfine_final < 1) = 1;
+    Sfine_final(Sfine_final > P.S_CLIP_MAX) = P.S_CLIP_MAX;
+else
+    Sfine_final = nan(H, W);
+    maskFine_final = false(H, W);
 end
-
-% Normalize by accumulated weight
-hasData = wgrid > 1e-12;
-Sfine_final(hasData) = Sfine_final(hasData) ./ wgrid(hasData);
-Sfine_final(~hasData) = NaN;
-
-% Smooth the scattered result to fill gaps
-maskF_raw = isfinite(Sfine_final);
-Sfine_final = smooth2_gaussian_nan(Sfine_final, maskF_raw, P.FIELD_SMOOTH_SIG * 2);
-maskFine_final = isfinite(Sfine_final);
-
-% Clip for display
-Sfine_final(Sfine_final < 1) = 1;
-Sfine_final(Sfine_final > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 end
 
 function Sout = smooth2_gaussian_nan(Sin, mask, sigma_cells)
@@ -889,12 +866,6 @@ function Smax = monodromy_to_Smax(M)
 Smax = Sig(1,1);
 end
 
-function s = nansum_pair(a, b)
-% Sum two scalars treating NaN as 0.
-if isnan(a), a = 0; end
-if isnan(b), b = 0; end
-s = a + b;
-end
 
 % --------- Dynamics / FD monodromy backend (vertical-kick) ---------
 function varargout = kd_dyn_vert(func, varargin)
