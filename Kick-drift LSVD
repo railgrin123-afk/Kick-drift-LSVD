@@ -107,6 +107,12 @@ SParams.S_CLIP_MAX        = 6.0;   % color scale upper cap for display (avoid hu
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
 SParams.SHOW_ONLY_THR_CONTOUR = true;
 
+% Custom colormap: blue -> yellow (no cyan/teal)
+nCmap = 256;
+cmap_blue_yellow = [linspace(0.15, 1, nCmap)', ...
+                    linspace(0.15, 1, nCmap)', ...
+                    linspace(0.8,  0, nCmap)'];   % [dark blue] -> [yellow]
+
 % -------------------- YELLOW -> BLUE transitions (NEW OVERLAY) --------------------
 % "orange" means: S was > 2 last cycle, now S <= 2
 SHOW_Y2B_ORANGE = true;
@@ -290,6 +296,7 @@ for it = 1:cycles
         axis image off;
         set(hIm,'AlphaData', 1.0 * maskFine);    % hide NaN regions cleanly
         caxis([1, SParams.S_CLIP_MAX]);
+        colormap(figS, cmap_blue_yellow);
         colorbar;
         title(sprintf('cycle %d: S at STARTING location (x_0,y_0) | Nwin=%d, t0=%d  [clipped at %.1f]', ...
               it, Nw, t0_recent, SParams.S_CLIP_MAX));
@@ -322,6 +329,7 @@ for it = 1:cycles
             axis image off;
             set(hImF,'AlphaData', 1.0 * maskFine_final);
             caxis([1, SParams.S_CLIP_MAX]);
+            colormap(figSF, cmap_blue_yellow);
             colorbar;
             title(sprintf('cycle %d: S at CURRENT location (x_N,y_N) | Nwin=%d, t0=%d  [clipped at %.1f]', ...
                   it, Nw, t0_recent, SParams.S_CLIP_MAX));
@@ -367,6 +375,7 @@ for it = 1:cycles
             h2 = imagesc(Sfine);
             set(h2,'AlphaData', SParams.FIELD_ALPHA * maskFine);
             caxis([1, SParams.S_CLIP_MAX]);
+            colormap(figB, cmap_blue_yellow);
             % add ONLY the S=2 boundary to avoid squiggle-spam
             contour(Sfine, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.1);
         end
@@ -402,6 +411,7 @@ for it = 1:cycles
             h3 = imagesc(Sfine_final);
             set(h3,'AlphaData', SParams.FIELD_ALPHA * maskFine_final);
             caxis([1, SParams.S_CLIP_MAX]);
+            colormap(figC, cmap_blue_yellow);
             colorbar;
 
             % contour at S = S_THR on the final-location field
