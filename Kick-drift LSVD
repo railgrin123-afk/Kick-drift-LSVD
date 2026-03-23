@@ -198,7 +198,7 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine, maskFine] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+        [Sfine, maskFine, Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
         % -------------------- (NEW) ORANGE MASK: (S_prev > 2) -> (S_now <= 2) --------------------
         y2bMask = false(rows, cols);
@@ -283,7 +283,7 @@ for it = 1:cycles
 
         figS = figure(5000 + it); clf;
         set(figS,'Color','w','Position',[1000 80 900 900], ...
-            'Name', sprintf('Cycle %d: S(x0,y0) magnitude', it));
+            'Name', sprintf('Cycle %d: S-field at STARTING locations', it));
 
         % show magnitude map of S vs where we started
         hIm = imagesc(Sfine);
@@ -291,7 +291,7 @@ for it = 1:cycles
         set(hIm,'AlphaData', 1.0 * maskFine);    % hide NaN regions cleanly
         caxis([1, SParams.S_CLIP_MAX]);
         colorbar;
-        title(sprintf('cycle %d: S(x_0,y_0) (Nwin=%d, t0=%d)  [clipped at %.1f]', ...
+        title(sprintf('cycle %d: S at STARTING location (x_0,y_0) | Nwin=%d, t0=%d  [clipped at %.1f]', ...
               it, Nw, t0_recent, SParams.S_CLIP_MAX));
 
         hold on;
@@ -311,8 +311,38 @@ for it = 1:cycles
        
         hold off;
         drawnow;
+
+        % ---- S-field at CURRENT (FINAL) locations: standalone heatmap ----
+        if ~isempty(Sfine_final)
+            figSF = figure(5500 + it); clf;
+            set(figSF,'Color','w','Position',[1050 80 900 900], ...
+                'Name', sprintf('Cycle %d: S-field at CURRENT locations', it));
+
+            hImF = imagesc(Sfine_final);
+            axis image off;
+            set(hImF,'AlphaData', 1.0 * maskFine_final);
+            caxis([1, SParams.S_CLIP_MAX]);
+            colorbar;
+            title(sprintf('cycle %d: S at CURRENT location (x_N,y_N) | Nwin=%d, t0=%d  [clipped at %.1f]', ...
+                  it, Nw, t0_recent, SParams.S_CLIP_MAX));
+
+            hold on;
+            if SHOW_Y2B_ORANGE && any(y2bMask(:))
+                overlay_mask_rgb(y2bMask, [1 0 1], SParams.TRANS_ALPHA);
+            end
+
+            if SParams.SHOW_ONLY_THR_CONTOUR
+                contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.2);
+            else
+                contour(Sfine_final, [1.2 1.5 2.0 3.0 4.0], 'w', 'LineWidth', 0.8);
+            end
+
+            hold off;
+            drawnow;
+        end
     else
         Sfine = []; maskFine = [];
+        Sfine_final = []; maskFine_final = [];
     end
 
     % ---- (C) LOW-STRETCH yellow dots + optional overlay of the S-field ----
@@ -323,9 +353,10 @@ for it = 1:cycles
         % dots from your robust voting scheme
         [xyLow, xyHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, Pnow, rows, cols);
 
+        % ============ FIGURE: S-field at STARTING locations on kick-drift map ============
         figB = figure(3000 + it);
         set(figB,'Color','w','Position',[80 80 900 900], ...
-            'Name', sprintf('Cycle %d: low-stretch dots', it));
+            'Name', sprintf('Cycle %d: S-field at STARTING locations (on kick-drift)', it));
 
         imshow(stage2_img, []);
         axis image off;
@@ -350,12 +381,49 @@ for it = 1:cycles
             plot(xyLow(:,1), xyLow(:,2), '.', 'MarkerSize', 12, 'Color', [1 0.5 0]);
         end
 
-        title(sprintf(['cycle %d: LOW-STRETCH DOTS (S<=%.2f) | Nwin=%d | ' ...
+        title(sprintf(['cycle %d: S-field at STARTING locations (S<=%.2f) | Nwin=%d | ' ...
                        'low=%d, stretched=%d, passes=%d'], ...
               it, Pnow.S_THR, Pnow.Nwin, stats.n_low, stats.n_high, stats.passes));
 
         hold off;
         drawnow;
+
+        % ============ FIGURE: S-field at CURRENT (FINAL) locations on kick-drift map ============
+        if ~isempty(Sfine_final)
+            figC = figure(4000 + it);
+            set(figC,'Color','w','Position',[100 100 900 900], ...
+                'Name', sprintf('Cycle %d: S-field at CURRENT locations (on kick-drift)', it));
+
+            imshow(stage2_img, []);
+            axis image off;
+            hold on;
+
+            % overlay S-field remapped to final (current) positions
+            h3 = imagesc(Sfine_final);
+            set(h3,'AlphaData', SParams.FIELD_ALPHA * maskFine_final);
+            caxis([1, SParams.S_CLIP_MAX]);
+            colorbar;
+
+            % contour at S = S_THR on the final-location field
+            contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.1);
+
+            % ---- ORANGE overlay (yellow->blue transition) ----
+            if SHOW_Y2B_ORANGE && any(y2bMask(:))
+                overlay_mask_rgb(y2bMask, [1 0 1], min(0.60, SParams.TRANS_ALPHA + 0.10));
+            end
+
+            % yellow DOTS only (no boxes)
+            if ~isempty(xyLow)
+                plot(xyLow(:,1), xyLow(:,2), '.', 'MarkerSize', 12, 'Color', [1 0.5 0]);
+            end
+
+            title(sprintf(['cycle %d: S-field at CURRENT locations (S<=%.2f) | Nwin=%d | ' ...
+                           'low=%d, stretched=%d, passes=%d'], ...
+                  it, Pnow.S_THR, Pnow.Nwin, stats.n_low, stats.n_high, stats.passes));
+
+            hold off;
+            drawnow;
+        end
         % store for next cycle comparison
         S_prev    = Sfine;
         mask_prev = maskFine;
@@ -682,11 +750,15 @@ stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_pa
 end
 
 % ------------------- S magnitude field vs start (this is the "contour plot") -------------------
-function [Sfine, maskFine] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+function [Sfine, maskFine, Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
 % Computes a *scalar field* S(x0,y0) on a coarse grid, smooths it, then
 % interpolates to full resolution so you can:
 %   - see magnitude (heatmap + colorbar)
 %   - draw clean contours (e.g. S=2)
+%
+% Returns TWO versions:
+%   Sfine, maskFine             — S values at STARTING locations (x0,y0)
+%   Sfine_final, maskFine_final — same S values remapped to FINAL (current) locations
 
 step = P.FIELD_STEP;
 ys = 1:step:H;   % 1-based for plotting
@@ -695,12 +767,16 @@ xs = 1:step:W;
 Scoarse = nan(numel(ys), numel(xs));
 maskC   = false(numel(ys), numel(xs));
 
+% Store final positions for each coarse grid point
+finalY_coarse = nan(numel(ys), numel(xs));
+finalX_coarse = nan(numel(ys), numel(xs));
+
 for iy = 1:numel(ys)
     for ix = 1:numel(xs)
         y0 = double(ys(iy) - 1);  % dynamics uses 0-based
         x0 = double(xs(ix) - 1);
 
-        [M_raw, ~] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
+        [M_raw, xyNw] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
         [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, 5e-3);
 
         if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
@@ -709,9 +785,14 @@ for iy = 1:numel(ys)
 
         Scoarse(iy,ix) = monodromy_to_Smax(M_sym);
         maskC(iy,ix)   = true;
+
+        % Store final (current) positions (0-based -> 1-based for plotting)
+        finalX_coarse(iy,ix) = mod(xyNw(1), W) + 1;
+        finalY_coarse(iy,ix) = mod(xyNw(2), H) + 1;
     end
 end
 
+% ---- START-location S-field (original) ----
 % Smooth with NaN-aware Gaussian (prevents ugly pixel blocks)
 Ssm = smooth2_gaussian_nan(Scoarse, maskC, P.FIELD_SMOOTH_SIG);
 
@@ -725,6 +806,59 @@ maskFine = isfinite(Sfine);
 % Clip for display (magnitude still correct, just not blown out visually)
 Sfine(Sfine < 1) = 1;
 Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
+
+% ---- FINAL-location S-field (scatter -> grid) ----
+% Scatter S values onto the full-res grid at their final positions
+Sfine_final = nan(H, W);
+wgrid       = zeros(H, W);   % accumulator for weighted average
+
+validC = maskC & isfinite(Scoarse);
+Svals  = Scoarse(validC);
+fxVals = finalX_coarse(validC);
+fyVals = finalY_coarse(validC);
+
+% Deposit each coarse S value at its final pixel (bilinear splat)
+for k = 1:numel(Svals)
+    fx = fxVals(k);
+    fy = fyVals(k);
+    sv = Svals(k);
+
+    % bilinear corners (1-based pixel coords)
+    ix0 = floor(fx);  ix1 = ix0 + 1;
+    iy0 = floor(fy);  iy1 = iy0 + 1;
+    wx  = fx - ix0;   wy  = fy - iy0;
+
+    % wrap to [1, W] and [1, H]
+    ix0 = mod(ix0-1, W) + 1;  ix1 = mod(ix1-1, W) + 1;
+    iy0 = mod(iy0-1, H) + 1;  iy1 = mod(iy1-1, H) + 1;
+
+    w00 = (1-wx)*(1-wy);  w01 = wx*(1-wy);
+    w10 = (1-wx)*wy;      w11 = wx*wy;
+
+    Sfine_final(iy0,ix0) = nansum_pair(Sfine_final(iy0,ix0), sv*w00);
+    Sfine_final(iy0,ix1) = nansum_pair(Sfine_final(iy0,ix1), sv*w01);
+    Sfine_final(iy1,ix0) = nansum_pair(Sfine_final(iy1,ix0), sv*w10);
+    Sfine_final(iy1,ix1) = nansum_pair(Sfine_final(iy1,ix1), sv*w11);
+
+    wgrid(iy0,ix0) = wgrid(iy0,ix0) + w00;
+    wgrid(iy0,ix1) = wgrid(iy0,ix1) + w01;
+    wgrid(iy1,ix0) = wgrid(iy1,ix0) + w10;
+    wgrid(iy1,ix1) = wgrid(iy1,ix1) + w11;
+end
+
+% Normalize by accumulated weight
+hasData = wgrid > 1e-12;
+Sfine_final(hasData) = Sfine_final(hasData) ./ wgrid(hasData);
+Sfine_final(~hasData) = NaN;
+
+% Smooth the scattered result to fill gaps
+maskF_raw = isfinite(Sfine_final);
+Sfine_final = smooth2_gaussian_nan(Sfine_final, maskF_raw, P.FIELD_SMOOTH_SIG * 2);
+maskFine_final = isfinite(Sfine_final);
+
+% Clip for display
+Sfine_final(Sfine_final < 1) = 1;
+Sfine_final(Sfine_final > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 end
 
 function Sout = smooth2_gaussian_nan(Sin, mask, sigma_cells)
@@ -753,6 +887,13 @@ end
 function Smax = monodromy_to_Smax(M)
 [~,Sig,~] = svd(M);
 Smax = Sig(1,1);
+end
+
+function s = nansum_pair(a, b)
+% Sum two scalars treating NaN as 0.
+if isnan(a), a = 0; end
+if isnan(b), b = 0; end
+s = a + b;
 end
 
 % --------- Dynamics / FD monodromy backend (vertical-kick) ---------
