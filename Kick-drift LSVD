@@ -107,12 +107,12 @@ SParams.S_CLIP_MAX        = 6.0;   % color scale upper cap for display (avoid hu
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
 SParams.SHOW_ONLY_THR_CONTOUR = true;
 
-% Viridis-style colormap: dark purple -> teal -> yellow
+% Custom colormap: dark cyan -> teal -> yellow
 nCmap = 256;
 t = linspace(0, 1, nCmap)';
-cmap_blue_yellow = [ 0.267*(1-t).^2 + 0.129*2.*t.*(1-t) + 0.993*t.^2, ...
-                     0.004*(1-t).^2 + 0.566*2.*t.*(1-t) + 0.906*t.^2, ...
-                     0.329*(1-t).^2 + 0.692*2.*t.*(1-t) + 0.144*t.^2 ];
+cmap_blue_yellow = [ 0.0*(1-t).^2 + 0.129*2.*t.*(1-t) + 0.993*t.^2, ...
+                     0.25*(1-t).^2 + 0.566*2.*t.*(1-t) + 0.906*t.^2, ...
+                     0.35*(1-t).^2 + 0.692*2.*t.*(1-t) + 0.144*t.^2 ];
 
 % -------------------- YELLOW -> BLUE transitions (NEW OVERLAY) --------------------
 % "orange" means: S was > 2 last cycle, now S <= 2
