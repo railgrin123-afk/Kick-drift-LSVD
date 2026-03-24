@@ -442,6 +442,9 @@ for it = 1:cycles
     end
 end
 
+final_img = cur;
+fprintf('\nSim done: frames=%d, kicks=%d\n', numel(img_hist), numel(dp_x_hist));
+
 % -------------------- NEW FIGURE: blue/yellow area vs cycle --------------------
 figure(6001); clf;
 set(gcf,'Color','w','Position',[120 80 720 420], 'Name','S-field blue/yellow area vs cycle');
@@ -456,8 +459,6 @@ xlabel('cycle');
 ylabel('fraction of valid S-field pixels'); %Out of all the start-pixels where we computed S, what percent are low-stretch (or high-stretch)
 title(sprintf('Area fractions from S-field: blue=S<=%.2f, yellow=S>%.2f', SParams.S_THR, SParams.S_THR));
 legend('blue (low-stretch)','yellow (stretched)','Location','best');
-
-fprintf('Sim done: frames=%d, kicks=%d\n', numel(img_hist), numel(dp_x_hist));
 
 % ===================== EXTRA FIGURES: AREA + BLOBS vs CYCLE =====================
 
@@ -535,6 +536,241 @@ grid on;
 xlabel('cycle'); ylabel('pixels flipped (full-res)');
 title('Area that flipped: (S>2) -> (S<=2)');
 
+%% ========================================================================
+%%  E)  FINAL FULL-RESOLUTION BLOB ANALYSIS
+%%      Runs once after the last cycle on the finest available S-field.
+%%
+%%  Per-blob outputs
+%%  ----------------
+%%  blob_area    : pixel count
+%%  blob_frac    : fraction of total valid S-field pixels
+%%  blob_cx/cy   : centroid in image (col, row) coordinates (1-based)
+%%  blob_xmin/xmax/ymin/ymax : tight bounding box
+%%  blob_r_eq    : equivalent radius   r_eq = sqrt(A/pi)
+%%  blob_compact : compactness         C    = 4*pi*A / P^2
+%%                 (C=1 for a perfect circle; smaller = more irregular)
+%%
+%%  Written outputs
+%%  ---------------
+%%  blob_summary.txt - full ranked table including all fields above.
+%% ========================================================================
+fprintf('\n');
+fprintf('=============================================================\n');
+fprintf('  FINAL FULL-RESOLUTION BLOB ANALYSIS  (after %d cycles)\n', cycles);
+fprintf('=============================================================\n');
+
+%% -- recompute S-field on the final window (uses same parameters) --
+fprintf('Re-computing S-field on the final window ...\n');
+Tcur_fin = numel(dp_x_hist);
+Nw_fin   = min(SParams.Nwin, Tcur_fin);
+t0_fin   = max(0, Tcur_fin - Nw_fin);
+
+[Sfin, maskFin] = compute_s1_field(dp_x_hist, row0, Tau, rows, cols, ...
+                                   t0_fin, Nw_fin, SParams);
+
+valid_fin     = maskFin & isfinite(Sfin);
+low_mask_fin  = valid_fin & (Sfin <= SParams.S_THR);
+high_mask_fin = valid_fin & (Sfin >  SParams.S_THR);
+
+tot_valid  = nnz(valid_fin);
+tot_low    = nnz(low_mask_fin);
+tot_high   = nnz(high_mask_fin);
+frac_low_f = tot_low  / max(1, tot_valid);
+frac_high_f= tot_high / max(1, tot_valid);
+
+%% -- connected components at FULL resolution --
+fprintf('Running full-resolution connected-component analysis ...\n');
+CC_final = get_CC_full(low_mask_fin, SParams.BLOB_CONN);
+nF       = numel(CC_final);
+fprintf('  Found %d low-stretch blob(s).\n', nF);
+
+%% -- compute per-blob statistics --
+[H_im, W_im] = size(low_mask_fin);
+
+blob_area    = zeros(nF,1);
+blob_frac    = zeros(nF,1);
+blob_cx      = zeros(nF,1);
+blob_cy      = zeros(nF,1);
+blob_xmin    = zeros(nF,1);
+blob_xmax    = zeros(nF,1);
+blob_ymin    = zeros(nF,1);
+blob_ymax    = zeros(nF,1);
+blob_r_eq    = zeros(nF,1);
+blob_compact = zeros(nF,1);
+
+for k = 1:nF
+    idx_lin  = CC_final{k};
+    [ry, rx] = ind2sub([H_im, W_im], idx_lin);
+    A = numel(idx_lin);
+
+    blob_area(k)  = A;
+    blob_frac(k)  = A / max(1, tot_valid);
+    blob_cx(k)    = mean(rx);
+    blob_cy(k)    = mean(ry);
+    blob_xmin(k)  = min(rx);  blob_xmax(k) = max(rx);
+    blob_ymin(k)  = min(ry);  blob_ymax(k) = max(ry);
+    blob_r_eq(k)  = sqrt(A / pi);
+
+    % perimeter-based compactness  C = 4*pi*A / P^2
+    BW_blob = false(H_im, W_im);
+    BW_blob(idx_lin) = true;
+    P = compute_perimeter(BW_blob);
+    if P > 0
+        blob_compact(k) = 4*pi*A / P^2;
+    else
+        blob_compact(k) = NaN;
+    end
+end
+
+%% -- sort blobs by area (largest first) --
+[blob_area, si] = sort(blob_area, 'descend');
+blob_frac       = blob_frac(si);
+blob_cx         = blob_cx(si);
+blob_cy         = blob_cy(si);
+blob_xmin       = blob_xmin(si);
+blob_xmax       = blob_xmax(si);
+blob_ymin       = blob_ymin(si);
+blob_ymax       = blob_ymax(si);
+blob_r_eq       = blob_r_eq(si);
+blob_compact    = blob_compact(si);
+CC_sorted       = CC_final(si);
+
+%% -- print ranked table to console --
+fprintf('\n');
+fprintf('  Total valid pixels  : %d\n', tot_valid);
+fprintf('  Low-stretch pixels  : %d  (%.2f%%)\n', tot_low,  frac_low_f *100);
+fprintf('  Stretched pixels    : %d  (%.2f%%)\n', tot_high, frac_high_f*100);
+fprintf('  Number of blobs     : %d\n\n', nF);
+
+fprintf('  %-5s  %-9s  %-7s  %-7s  %-7s  %-6s  %-9s\n', ...
+    'Rank','Area(px)','Frac','Cx','Cy','r_eq','Compact');
+fprintf('  %s\n', repmat('-',1,60));
+for k = 1:nF
+    fprintf('  %-5d  %-9d  %.4f  %-7.1f  %-7.1f  %-6.2f  %.4f\n', ...
+            k, blob_area(k), blob_frac(k), ...
+            blob_cx(k), blob_cy(k), blob_r_eq(k), blob_compact(k));
+end
+fprintf('  %s\n', repmat('-',1,60));
+fprintf('  Total low-stretch blob area : %d px  (%.4f of valid field)\n', ...
+        sum(blob_area), sum(blob_frac));
+fprintf('=============================================================\n\n');
+
+%% -- write blob_summary.txt --
+fid = fopen('blob_summary.txt','w');
+fprintf(fid,'FINAL LOW-STRETCH BLOB SUMMARY\n');
+fprintf(fid,'Simulation: cycles=%d | Nwin=%d | S_THR=%.2f\n', ...
+        cycles, Nw_fin, SParams.S_THR);
+fprintf(fid,'Image size: %d rows x %d cols\n\n', rows, cols);
+fprintf(fid,'Global:\n');
+fprintf(fid,'  Total valid pixels  : %d\n',         tot_valid);
+fprintf(fid,'  Low-stretch pixels  : %d  (%.6f)\n', tot_low,  frac_low_f);
+fprintf(fid,'  Stretched pixels    : %d  (%.6f)\n', tot_high, frac_high_f);
+fprintf(fid,'  Number of blobs     : %d\n\n',        nF);
+hdr = sprintf('%-5s  %-9s  %-10s  %-8s  %-8s  %-6s  %-6s  %-6s  %-6s  %-7s  %-9s\n', ...
+    'Rank','Area(px)','Frac','Cx','Cy','Xmin','Xmax','Ymin','Ymax','r_eq','Compact');
+fprintf(fid,'%s%s\n', hdr, repmat('-',1,90));
+for k = 1:nF
+    fprintf(fid,'%-5d  %-9d  %-10.6f  %-8.2f  %-8.2f  %-6d  %-6d  %-6d  %-6d  %-7.2f  %.6f\n', ...
+            k, blob_area(k), blob_frac(k), ...
+            blob_cx(k), blob_cy(k), ...
+            blob_xmin(k), blob_xmax(k), blob_ymin(k), blob_ymax(k), ...
+            blob_r_eq(k), blob_compact(k));
+end
+fprintf(fid,'\nTotal low-stretch blob area: %d px  (%.6f of valid field)\n', ...
+        sum(blob_area), sum(blob_frac));
+fclose(fid);
+fprintf('Blob table written to  blob_summary.txt\n\n');
+
+%% ========================================================================
+%%  F)  Final analysis figures
+%% ========================================================================
+
+%% -- Fig 7001: Final S-field + S_THR contour + numbered blob overlays --
+figure(7001); clf;
+set(gcf,'Color','w','Position',[100 60 1100 950], ...
+    'Name', sprintf('Final s_1 field + blob map  (cycle %d)', cycles));
+hIm = imagesc(Sfin);
+set(hIm,'AlphaData', double(maskFin));
+axis image off;
+caxis([1, SParams.S_CLIP_MAX]);
+colormap(gca, cmap_blue_yellow); colorbar;
+title(sprintf('Final s_1(x_0,y_0)  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs', ...
+              SParams.S_THR, Nw_fin, nF));
+hold on;
+% draw S=S_THR boundary
+contour(Sfin, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth',1.5);
+% semi-transparent coloured fill + text label for each blob
+cmap_blobs = lines(max(nF,1));
+for k = 1:nF
+    BW_blob = false(H_im, W_im);
+    BW_blob(CC_sorted{k}) = true;
+    rgb_im        = zeros(H_im, W_im, 3);
+    rgb_im(:,:,1) = cmap_blobs(k,1);
+    rgb_im(:,:,2) = cmap_blobs(k,2);
+    rgb_im(:,:,3) = cmap_blobs(k,3);
+    hB = image(rgb_im);
+    set(hB,'AlphaData', 0.35 * double(BW_blob));
+    text(blob_cx(k), blob_cy(k), ...
+         sprintf('#%d\n%dpx\nr=%.1f', k, blob_area(k), blob_r_eq(k)), ...
+         'Color','w','FontSize',7,'FontWeight','bold', ...
+         'HorizontalAlignment','center','VerticalAlignment','middle', ...
+         'BackgroundColor',[0 0 0 0.4]);
+end
+hold off; drawnow;
+
+%% -- Fig 7002: Ranked bar chart of blob areas + cumulative line --
+figure(7002); clf;
+set(gcf,'Color','w','Position',[120 80 800 450], ...
+    'Name','Final blob areas - ranked bar chart');
+bar(1:nF, blob_area, 'FaceColor',[0.2 0.5 0.9]);
+hold on;
+plot(1:nF, cumsum(blob_area), 'r-o','LineWidth',1.5,'MarkerSize',5);
+grid on;
+xlabel('blob rank (1 = largest)');
+ylabel('area  (full-resolution pixels)');
+title(sprintf('Low-stretch blob areas after %d cycles  (s_1 \\leq %.2f)', ...
+              cycles, SParams.S_THR));
+legend('individual blob area','cumulative area','Location','northwest');
+xticks(1:nF);
+
+%% -- Fig 7003: Compactness vs equivalent radius --
+figure(7003); clf;
+set(gcf,'Color','w','Position',[140 80 700 500], ...
+    'Name','Final blobs: compactness vs equivalent radius');
+valid_c = isfinite(blob_compact);
+if any(valid_c)
+    scatter(blob_r_eq(valid_c), blob_compact(valid_c), 80, ...
+            blob_area(valid_c), 'filled');
+    colorbar; colormap(gca, cmap_blue_yellow);
+end
+xlabel('equivalent radius  r_{eq} = \surd(A/\pi)  [pixels]');
+ylabel('compactness  C = 4\piA/P^2  (C=1 for circle)');
+title('Blob shape: compactness vs size  (colour = area)');
+grid on;
+for k = 1:nF
+    if isfinite(blob_compact(k))
+        text(blob_r_eq(k)+0.3, blob_compact(k), sprintf('#%d',k), ...
+             'FontSize',8,'Color',[0.2 0.2 0.2]);
+    end
+end
+
+%% -- Fig 7004: Cumulative low-stretch area vs blob rank --
+figure(7004); clf;
+set(gcf,'Color','w','Position',[160 80 700 450], ...
+    'Name','Cumulative low-stretch area vs blob rank');
+cum_area      = cumsum(blob_area);
+area_frac_vec = cum_area / max(1, tot_valid);
+yyaxis left;
+plot(1:nF, cum_area, 'b-o','LineWidth',1.6,'MarkerSize',5);
+ylabel('cumulative area  (pixels)');
+yyaxis right;
+plot(1:nF, area_frac_vec*100, 'r--^','LineWidth',1.6,'MarkerSize',5);
+ylabel('cumulative fraction of valid field  (%)');
+xlabel('blob rank (1 = largest)');
+title('How much of the low-stretch region is in the top-N blobs?');
+grid on; xticks(1:nF);
+
+fprintf('All figures generated.  blob_summary.txt written.\n');
 
 % ====================== Local functions (end of file) ======================
 
@@ -1091,4 +1327,144 @@ rgbImg(:,:,3) = rgb(3);
 
 h = image(rgbImg);
 set(h, 'AlphaData', alpha * double(mask));
+end
+
+%% ---- N-step scalar propagation (used by FD monodromy) ----
+function [xo, yo] = propagate_N(xi, yi, t0, N, dp_hist, Tau, row0)
+    T  = numel(dp_hist);
+    xo = xi; yo = yi;
+    for k = 0:(floor(N)-1)
+        dp = dp_hist{mod(t0+k, T)+1};
+        Yc = yo + interp_kick_x(xo, dp);
+        Xc = xo + Tau*(Yc - row0);
+        xo = Xc; yo = Yc;
+    end
+end
+
+%% ---- monodromy via 5-point central-difference FD (standalone) ----
+function [M, xyNw] = monodromy_fd_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0, eps_)
+    if nargin < 10, eps_ = 1e-3; end
+    [xN0,  yN0]  = propagate_N(double(x0),      double(y0),      t0,N,dp_hist,Tau,row0);
+    [xNxp, yNxp] = propagate_N(double(x0)+eps_, double(y0),      t0,N,dp_hist,Tau,row0);
+    [xNxm, yNxm] = propagate_N(double(x0)-eps_, double(y0),      t0,N,dp_hist,Tau,row0);
+    [xNyp, yNyp] = propagate_N(double(x0),      double(y0)+eps_, t0,N,dp_hist,Tau,row0);
+    [xNym, yNym] = propagate_N(double(x0),      double(y0)-eps_, t0,N,dp_hist,Tau,row0);
+    col1 = [(xNxp-xNxm)/(2*eps_); (yNxp-yNxm)/(2*eps_)];
+    col2 = [(xNyp-xNym)/(2*eps_); (yNyp-yNym)/(2*eps_)];
+    M    = [col1, col2];
+    detM = det(M);
+    if isfinite(detM) && detM > 0 && abs(detM-1) > 5e-3
+        M = M / sqrt(detM);
+    end
+    xyNw = [mod(xN0,cols), mod(yN0,rows)];
+end
+
+%% ---- S1 field: LARGEST SINGULAR VALUE ONLY (for final blob analysis) ----
+function [Sfine, maskFine] = compute_s1_field(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+    step = P.FIELD_STEP;
+    ys   = 1:step:H;
+    xs   = 1:step:W;
+    Ny   = numel(ys);
+    Nx   = numel(xs);
+    s1C   = nan(Ny, Nx);
+    maskC = false(Ny, Nx);
+
+    for iy = 1:Ny
+        for ix = 1:Nx
+            y0d = double(ys(iy) - 1);
+            x0d = double(xs(ix) - 1);
+            [M_raw, ~] = monodromy_fd_vert(y0d, x0d, t0, Nwin, ...
+                                           dp_x_hist, Tau, H, W, row0, 1e-3);
+            [M_sym, det_raw] = symplectify2x2(M_raw, P.DET_TOL);
+            if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
+                continue;
+            end
+            sv = svd(M_sym);
+            s1C(iy,ix)   = sv(1);
+            maskC(iy,ix) = true;
+        end
+    end
+
+    % NaN-aware separable Gaussian smoothing
+    s1S = smooth2_gaussian_nan(s1C, maskC, P.FIELD_SMOOTH_SIG);
+
+    % Interpolate coarse grid -> full image resolution
+    [Xc, Yc] = meshgrid(xs, ys);
+    [Xf, Yf] = meshgrid(1:W, 1:H);
+    Sfine    = interp2(Xc, Yc, s1S, Xf, Yf, 'linear', NaN);
+    maskFine = isfinite(Sfine);
+
+    % Clip display range
+    Sfine(Sfine < 1)            = 1;
+    Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
+end
+
+%% ---- full-resolution connected components (cell of linear-index lists) ----
+function CC = get_CC_full(BW, conn)
+    BW = logical(BW);
+    if exist('bwconncomp','file') == 2
+        C  = bwconncomp(BW, conn);
+        CC = C.PixelIdxList;
+    else
+        CC = bfs_CC(BW, conn);
+    end
+end
+
+%% ---- BFS connected components (no Image Processing Toolbox) ----
+function CC = bfs_CC(BW, conn)
+    [H,W] = size(BW);
+    vis   = false(H,W);
+    CC    = {};
+    for r = 1:H
+        for c = 1:W
+            if ~BW(r,c) || vis(r,c), continue; end
+            stack    = zeros(4096,1,'uint32');
+            top      = 1;
+            stack(1) = uint32(r + (c-1)*H);
+            vis(r,c) = true;
+            members  = zeros(0,1,'uint32');
+            while top > 0
+                idx = double(stack(top)); top = top-1;
+                members(end+1,1) = uint32(idx); %#ok<AGROW>
+                rr = mod(idx-1,H)+1;
+                cc = floor((idx-1)/H)+1;
+                % 4-connected neighbours
+                nbrs4 = [rr-1,cc; rr+1,cc; rr,cc-1; rr,cc+1];
+                ok4   = nbrs4(:,1)>=1 & nbrs4(:,1)<=H & ...
+                        nbrs4(:,2)>=1 & nbrs4(:,2)<=W;
+                nbrs  = nbrs4(ok4,:);
+                if conn == 8
+                    nbrsd = [rr-1,cc-1; rr-1,cc+1; rr+1,cc-1; rr+1,cc+1];
+                    okd   = nbrsd(:,1)>=1 & nbrsd(:,1)<=H & ...
+                            nbrsd(:,2)>=1 & nbrsd(:,2)<=W;
+                    nbrs  = [nbrs; nbrsd(okd,:)]; %#ok<AGROW>
+                end
+                for ni = 1:size(nbrs,1)
+                    nr=nbrs(ni,1); nc=nbrs(ni,2);
+                    if BW(nr,nc) && ~vis(nr,nc)
+                        vis(nr,nc) = true;
+                        top = top+1;
+                        if top > numel(stack), stack(end+4096) = 0; end
+                        stack(top) = uint32(nr+(nc-1)*H);
+                    end
+                end
+            end  % BFS while
+            CC{end+1} = double(members); %#ok<AGROW>
+        end
+    end
+end
+
+%% ---- discrete perimeter (4-connected boundary pixel count) ----
+function perim = compute_perimeter(BW)
+    BW   = logical(BW);
+    [H,W] = size(BW);
+    Pad  = false(H+2, W+2);
+    Pad(2:end-1, 2:end-1) = BW;
+    % pixel has all 4 neighbours in foreground -> it is interior
+    interior = Pad(2:end-1,2:end-1) & ...
+               Pad(1:end-2,2:end-1) & ...
+               Pad(3:end,  2:end-1) & ...
+               Pad(2:end-1,1:end-2) & ...
+               Pad(2:end-1,3:end);
+    perim = nnz(BW) - nnz(interior);
 end
