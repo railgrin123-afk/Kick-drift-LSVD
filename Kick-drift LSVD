@@ -715,16 +715,16 @@ fprintf('All low-stretch blobs total fit (actual cycle axis): A = %.6e * exp(%.6
 fprintf('\n');
 fprintf('=============================================================\n');
 fprintf('  FINAL FULL-RESOLUTION BLOB ANALYSIS  (after %d cycles)\n', cycles);
-fprintf('  [using CURRENT/FINAL locations]\n');
+fprintf('  [using STARTING locations]\n');
 fprintf('=============================================================\n');
 
-fprintf('Re-computing S-field on the final window (current locations) ...\n');
+fprintf('Re-computing S-field on the final window (starting locations) ...\n');
 Tcur_fin = numel(dp_x_hist);
 Nw_fin   = min(SParams.Nwin, Tcur_fin);
 t0_fin   = max(0, Tcur_fin - Nw_fin);
 
-[Sfin, maskFin] = compute_s1_field_final(dp_x_hist, row0, Tau, rows, cols, ...
-                                         t0_fin, Nw_fin, SParams);
+[Sfin, maskFin] = compute_s1_field(dp_x_hist, row0, Tau, rows, cols, ...
+                                   t0_fin, Nw_fin, SParams);
 
 valid_fin     = maskFin & isfinite(Sfin);
 low_mask_fin  = valid_fin & (Sfin <= SParams.S_THR);
@@ -809,7 +809,7 @@ fprintf('  Total low-stretch blob area : %d px  (%.4f of valid field)\n', ...
 fprintf('=============================================================\n\n');
 
 fid = fopen('blob_summary.txt','w');
-fprintf(fid,'FINAL LOW-STRETCH BLOB SUMMARY (CURRENT LOCATIONS)\n');
+fprintf(fid,'FINAL LOW-STRETCH BLOB SUMMARY\n');
 fprintf(fid,'Simulation: cycles=%d | Nwin=%d | S_THR=%.2f\n', ...
         cycles, Nw_fin, SParams.S_THR);
 fprintf(fid,'Image size: %d rows x %d cols\n\n', rows, cols);
@@ -845,7 +845,7 @@ set(hIm,'AlphaData', double(maskFin));
 axis image off;
 caxis([1, SParams.S_CLIP_MAX]);
 colormap(gca, cmap_blue_yellow); colorbar;
-title(sprintf('Final s_1(x_N,y_N) at CURRENT locations  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs', ...
+title(sprintf('Final s_1(x_0,y_0)  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs', ...
               SParams.S_THR, Nw_fin, nF));
 hold on;
 contour(Sfin, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth',1.5);
