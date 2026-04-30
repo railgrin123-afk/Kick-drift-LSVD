@@ -850,20 +850,30 @@ title(sprintf('Final s_1(x_N,y_N) at CURRENT locations  |  S_{THR}=%.1f  |  Nwin
 hold on;
 contour(Sfin, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth',1.5);
 cmap_blobs = lines(max(nF,1));
+
+% Build a single label image (avoids allocating a full-frame RGB per blob,
+% which previously crashed MATLAB for large images / many blobs).
+labelImg = zeros(H_im, W_im);
 for k = 1:nF
-    BW_blob = false(H_im, W_im);
-    BW_blob(CC_sorted{k}) = true;
-    rgb_im        = zeros(H_im, W_im, 3);
-    rgb_im(:,:,1) = cmap_blobs(k,1);
-    rgb_im(:,:,2) = cmap_blobs(k,2);
-    rgb_im(:,:,3) = cmap_blobs(k,3);
-    hB = image(rgb_im);
-    set(hB,'AlphaData', 0.35 * double(BW_blob));
+    labelImg(CC_sorted{k}) = k;
+end
+ax7001 = gca;
+ax_label = axes('Parent', gcf, 'Position', ax7001.Position);
+hB = imagesc(ax_label, labelImg);
+set(hB, 'AlphaData', 0.35 * double(labelImg > 0));
+axis(ax_label, 'image', 'off');
+ax_label.YDir = ax7001.YDir;
+xlim(ax_label, xlim(ax7001)); ylim(ax_label, ylim(ax7001));
+colormap(ax_label, [1 1 1; cmap_blobs]);
+caxis(ax_label, [0 max(nF,1)]);
+
+axes(ax7001);
+for k = 1:nF
     text(blob_cx(k), blob_cy(k), ...
          sprintf('#%d\n%dpx\nr=%.1f', k, blob_area(k), blob_r_eq(k)), ...
          'Color','w','FontSize',7,'FontWeight','bold', ...
          'HorizontalAlignment','center','VerticalAlignment','middle', ...
-         'BackgroundColor',[0 0 0 0.4]);
+         'BackgroundColor',[0 0 0]);
 end
 hold off; drawnow;
 
