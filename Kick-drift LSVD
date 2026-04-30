@@ -96,7 +96,7 @@ SParams.DET_TOL = 5e-3;        % det sanity for FD monodromy
 SParams.S_THR   = 2.0;         % your criterion: S <= 2 is low-stretch
 
 % dots deposited at START (because you want S vs where we started)
-SParams.DEPOSIT_AT_FINAL = false;
+SParams.DEPOSIT_AT_FINAL = true;
 
 % -------- S-field (magnitude map) settings (this makes the contour plot clean) -----
 SParams.FIELD_STEP        = 8;     % coarsening for S-field evaluation (bigger = faster)
@@ -120,8 +120,8 @@ SHOW_Y2B_ORANGE = true;
 
 SParams.TRANS_ALPHA = 0.45;    % transparency for orange overlay
 
-S_prev    = [];    % previous cycle S-field
-mask_prev = [];    % previous cycle validity mask
+S_prev_final    = [];
+mask_prev_final = [];
 
 y2b_area_px = zeros(cycles,1);
 y2b_frac    = zeros(cycles,1);
@@ -162,6 +162,20 @@ med_yellow_blob_area_px  = nan(cycles,1);
 
 max_blue_blob_area_px    = nan(cycles,1);
 max_yellow_blob_area_px  = nan(cycles,1);
+% -------------------- ADD-ON: full-res ranked low-stretch blob areas per cycle --------------------
+TOPK_LOW_BLOBS = 5;
+
+n_low_blobs_fullres              = nan(cycles,1);
+total_low_blob_area_px_fullres   = nan(cycles,1);
+largest_low_blob_area_px_fullres = nan(cycles,1);
+top3_low_blob_area_px_fullres    = nan(cycles,1);
+top5_low_blob_area_px_fullres    = nan(cycles,1);
+
+low_blob_rank_area_px_fullres = nan(cycles, TOPK_LOW_BLOBS);
+
+% -------------------- ADD-ON: store full SVD of monodromy --------------------
+STORE_FULL_SVD_EACH_CYCLE = true;
+svd_start_hist = cell(cycles,1);
 
 
 for it = 1:cycles
@@ -207,25 +221,80 @@ for it = 1:cycles
     if SHOW_S_FIELD_FIG
         [Sfine, maskFine, Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
-        % -------------------- (NEW) ORANGE MASK: (S_prev > 2) -> (S_now <= 2) --------------------
-        y2bMask = false(rows, cols);
+        % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
+        y2bMask_final = false(rows, cols);
 
-        if SHOW_Y2B_ORANGE && it > 1 && ~isempty(S_prev)
-            validBoth = maskFine & mask_prev & isfinite(Sfine) & isfinite(S_prev);
-            y2bMask   = validBoth & (S_prev > SParams.S_THR) & (Sfine <= SParams.S_THR);
+        if isempty(Sfine_final) || isempty(maskFine_final) || ~any(maskFine_final(:))
+            warning('cycle %d: current-location S-field is empty; skipping current-location analysis.', it);
 
-            y2b_area_px(it) = nnz(y2bMask);
-            denom = nnz(validBoth);
-            if denom > 0
-                y2b_frac(it) = y2b_area_px(it) / denom;
+            valid      = false(rows, cols);
+            blueMask   = false(rows, cols);
+            yellowMask = false(rows, cols);
+
+            y2b_area_px(it) = 0;
+            y2b_frac(it)    = 0;
+
+        else
+            % Use CURRENT / FINAL location field only
+            valid      = maskFine_final & isfinite(Sfine_final);
+            blueMask   = valid & (Sfine_final <= SParams.S_THR);   % low stretch at current location
+            yellowMask = valid & (Sfine_final >  SParams.S_THR);   % high stretch at current location
+
+            % yellow -> blue transition at CURRENT locations
+            if SHOW_Y2B_ORANGE && it > 1 && ~isempty(S_prev_final)
+                validBothF = valid & mask_prev_final & isfinite(S_prev_final);
+
+                y2bMask_final = validBothF & ...
+                                (S_prev_final >  SParams.S_THR) & ...
+                                (Sfine_final   <= SParams.S_THR);
+
+                y2b_area_px(it) = nnz(y2bMask_final);
+
+                denom = nnz(validBothF);
+                if denom > 0
+                    y2b_frac(it) = y2b_area_px(it) / denom;
+                else
+                    y2b_frac(it) = 0;
+                end
+            else
+                y2b_area_px(it) = 0;
+                y2b_frac(it)    = 0;
             end
         end
 
-        % -------------------- (NEW) AREA of blue/yellow regions (FULL RES) --------------------
-        valid = maskFine & isfinite(Sfine);
+        % -------------------- ADD-ON: full-res low-stretch blob areas this cycle --------------------
+        % One blob = one connected component of the low-stretch set S <= S_THR.
+        % This uses the full-resolution blueMask, not the downsampled blueB.
 
-        blueMask   = valid & (Sfine <= SParams.S_THR);   % "blue" = low stretch
-        yellowMask = valid & (Sfine >  SParams.S_THR);   % "yellow" = high stretch
+        CC_low_cycle = get_CC_full(blueMask, SParams.BLOB_CONN);
+
+        if isempty(CC_low_cycle)
+            aLow_full = [];
+        else
+            aLow_full = cellfun(@numel, CC_low_cycle(:));
+            aLow_full = sort(aLow_full(:), 'descend');
+        end
+
+        n_low_blobs_fullres(it) = numel(aLow_full);
+
+        if ~isempty(aLow_full)
+            total_low_blob_area_px_fullres(it)   = sum(aLow_full);
+            largest_low_blob_area_px_fullres(it) = aLow_full(1);
+
+            k3 = min(3, numel(aLow_full));
+            k5 = min(5, numel(aLow_full));
+
+            top3_low_blob_area_px_fullres(it) = sum(aLow_full(1:k3));
+            top5_low_blob_area_px_fullres(it) = sum(aLow_full(1:k5));
+
+            kk = min(TOPK_LOW_BLOBS, numel(aLow_full));
+            low_blob_rank_area_px_fullres(it,1:kk) = aLow_full(1:kk);
+        else
+            total_low_blob_area_px_fullres(it)   = 0;
+            largest_low_blob_area_px_fullres(it) = 0;
+            top3_low_blob_area_px_fullres(it)    = 0;
+            top5_low_blob_area_px_fullres(it)    = 0;
+        end
 
         area_blue_px(it)   = nnz(blueMask);
         area_yellow_px(it) = nnz(yellowMask);
@@ -268,15 +337,18 @@ for it = 1:cycles
             it, area_blue_px(it), frac_blue(it), n_blue_blobs(it), ...
             area_yellow_px(it), frac_yellow(it), n_yellow_blobs(it));
 
-        % -------------------- NEW: compute "blue vs yellow" area on the S-field --------------------
-        valid = maskFine & isfinite(Sfine);
-
-        blue_region   = valid & (Sfine <= SParams.S_THR);
-        yellow_region = valid & (Sfine >  SParams.S_THR);
-
-        area_blue_px(it)   = sum(blue_region(:));
-        area_yellow_px(it) = sum(yellow_region(:));
+        % -------------------- CURRENT-LOCATION blue/yellow area --------------------
+        area_blue_px(it)   = sum(blueMask(:));
+        area_yellow_px(it) = sum(yellowMask(:));
         area_total_px(it)  = sum(valid(:));
+
+        if area_total_px(it) > 0
+            frac_blue(it)   = area_blue_px(it)   / area_total_px(it);
+            frac_yellow(it) = area_yellow_px(it) / area_total_px(it);
+        else
+            frac_blue(it)   = NaN;
+            frac_yellow(it) = NaN;
+        end
 
         if area_total_px(it) > 0
             frac_blue(it)   = area_blue_px(it)   / area_total_px(it);
@@ -304,8 +376,8 @@ for it = 1:cycles
 
         hold on;
         % ---- ORANGE overlay on S-field plot (yellow->blue) ----
-        if SHOW_Y2B_ORANGE && any(y2bMask(:))
-            overlay_mask_rgb(y2bMask, [1 0 1], SParams.TRANS_ALPHA);  % orange
+        if SHOW_Y2B_ORANGE && any(y2bMask_final(:))
+            overlay_mask_rgb(y2bMask_final, [1 0 1], SParams.TRANS_ALPHA);
         end
 
         if SParams.SHOW_ONLY_THR_CONTOUR
@@ -336,8 +408,8 @@ for it = 1:cycles
                   it, Nw, t0_recent, SParams.S_CLIP_MAX));
 
             hold on;
-            if SHOW_Y2B_ORANGE && any(y2bMask(:))
-                overlay_mask_rgb(y2bMask, [1 0 1], SParams.TRANS_ALPHA);
+            if SHOW_Y2B_ORANGE && any(y2bMask_final(:))
+                overlay_mask_rgb(y2bMask_final, [1 0 1], SParams.TRANS_ALPHA);
             end
 
             if SParams.SHOW_ONLY_THR_CONTOUR
@@ -382,8 +454,8 @@ for it = 1:cycles
         end
 
         % ---- ORANGE overlay on the kick-drift + dots plot (yellow->blue) ----
-        if SHOW_Y2B_ORANGE && any(y2bMask(:))
-            overlay_mask_rgb(y2bMask, [1 0 1], min(0.60, SParams.TRANS_ALPHA + 0.10));
+        if SHOW_Y2B_ORANGE && any(y2bMask_final(:))
+            overlay_mask_rgb(y2bMask_final, [1 0 1], min(0.60, SParams.TRANS_ALPHA + 0.10));
         end
 
         % yellow DOTS only (no boxes)
@@ -419,8 +491,8 @@ for it = 1:cycles
             contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.1);
 
             % ---- ORANGE overlay (yellow->blue transition) ----
-            if SHOW_Y2B_ORANGE && any(y2bMask(:))
-                overlay_mask_rgb(y2bMask, [1 0 1], min(0.60, SParams.TRANS_ALPHA + 0.10));
+            if SHOW_Y2B_ORANGE && any(y2bMask_final(:))
+                overlay_mask_rgb(y2bMask_final, [1 0 1], min(0.60, SParams.TRANS_ALPHA + 0.10));
             end
 
             % yellow DOTS only (no boxes)
@@ -436,14 +508,19 @@ for it = 1:cycles
             drawnow;
         end
         % store for next cycle comparison
-        S_prev    = Sfine;
-        mask_prev = maskFine;
+        S_prev_final    = Sfine_final;
+        mask_prev_final = maskFine_final;
 
     end
 end
 
 final_img = cur;
 fprintf('\nSim done: frames=%d, kicks=%d\n', numel(img_hist), numel(dp_x_hist));
+% -------------------- ADD-ON: save full SVD history --------------------
+if STORE_FULL_SVD_EACH_CYCLE
+    save('full_svd_history.mat', 'svd_start_hist', '-v7.3');
+    fprintf('Full SVD history saved to full_svd_history.mat\n');
+end
 
 % -------------------- NEW FIGURE: blue/yellow area vs cycle --------------------
 figure(6001); clf;
@@ -535,6 +612,194 @@ plot(1:cycles, y2b_area_px, 'o-','LineWidth',1.5);
 grid on;
 xlabel('cycle'); ylabel('pixels flipped (full-res)');
 title('Area that flipped: (S>2) -> (S<=2)');
+% ===================== ADD-ON FIGURE: all low-stretch blobs total area vs cycle =====================
+figure(6400); clf;
+set(gcf,'Color','w','Position',[140 100 850 450], ...
+    'Name','All low-stretch blobs total area vs cycle');
+
+plot(1:cycles, total_low_blob_area_px_fullres, 'o-', 'LineWidth', 1.6);
+
+grid on;
+xlabel('cycle');
+ylabel('total area of all low-stretch blobs (pixels)');
+title(sprintf('All low-stretch blobs total area vs cycle  (S \\leq %.2f)', SParams.S_THR));
+legend('all low-stretch blobs total area', 'Location','best');
+
+drawnow;
+
+% ===================== NEW FIGURES: exponential/log decay starting at the actual intersection cycle =====================
+% We find where frac_blue and frac_yellow intersect.
+% Then we plot starting at that ACTUAL cycle value cStar, without shifting the x-axis.
+%
+% So if the intersection is at cStar = 2.4, then the x-axis starts at 2.4,
+% and the later data points remain at cycles 3,4,5,...
+
+dBY = frac_blue - frac_yellow;
+iCross = find(dBY(1:end-1).*dBY(2:end) <= 0, 1, 'first');
+
+if isempty(iCross)
+    warning('No blue/yellow intersection found. Using cycle 1 as start.');
+    cStar  = 1;
+    iStart = 1;
+else
+    c1 = iCross;
+    c2 = iCross + 1;
+
+    d1 = dBY(c1);
+    d2 = dBY(c2);
+
+    % linear interpolation for the crossing location
+    if abs(d2 - d1) < 1e-12
+        cStar = c1;
+    else
+        cStar = c1 - d1*(c2 - c1)/(d2 - d1);
+    end
+
+    % start the real sampled data at the first full cycle after the crossing
+    iStart = c2;
+end
+
+fprintf('\n');
+fprintf('Blue/yellow intersection estimated at cycle c* = %.4f\n', cStar);
+fprintf('Using actual cycle axis starting at c* = %.4f\n', cStar);
+fprintf('Using sampled data from cycle %d to %d for fitting.\n', iStart, cycles);
+
+%% ------------------------------------------------------------------------
+%%  Figure 6500: LOW-STRETCH AREA (area_blue_px) using ACTUAL cycle axis
+%% ------------------------------------------------------------------------
+xA = (iStart:cycles)';          % actual cycle numbers
+yA = area_blue_px(iStart:cycles);
+
+goodA = isfinite(xA) & isfinite(yA) & (yA > 0);
+
+if nnz(goodA) >= 2
+    pA = polyfit(xA(goodA), log(yA(goodA)), 1);   % log(A) = pA(1)*cycle + pA(2)
+    logyA_fit = polyval(pA, xA(goodA));
+    yA_fit    = exp(logyA_fit);
+
+    kA   = pA(1);
+    A0A  = exp(pA(2));
+    tauA = -1 / kA;
+else
+    pA = [NaN NaN];
+    logyA_fit = [];
+    yA_fit    = [];
+    kA = NaN; A0A = NaN; tauA = NaN;
+end
+
+% interpolated value exactly at the intersection cycle
+yA_cross = interp1(1:cycles, area_blue_px, cStar, 'linear', 'extrap');
+
+figure(6500); clf;
+set(gcf,'Color','w','Position',[120 100 1150 430], ...
+    'Name','Low-stretch area decay starting at actual blue/yellow intersection cycle');
+tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+
+% --- left: semilogy plot ---
+nexttile;
+semilogy(cStar, yA_cross, 'ks', 'MarkerFaceColor','y', 'MarkerSize',8); hold on;
+semilogy(xA(goodA), yA(goodA), 'o-', 'LineWidth',1.5);
+if nnz(goodA) >= 2
+    semilogy(xA(goodA), yA_fit, '--', 'LineWidth',1.8);
+    legend('intersection', 'data', ...
+           sprintf('exp fit: A = %.3e exp(%.3f c)', A0A, kA), ...
+           'Location','best');
+else
+    legend('intersection', 'data', 'Location','best');
+end
+grid on;
+xlabel('cycle');
+ylabel('low-stretch area (pixels)');
+title('Low-stretch area decay (semilogy, actual cycle axis)');
+xlim([cStar cycles]);
+
+% --- right: linearized log plot ---
+nexttile;
+plot(cStar, log(yA_cross), 'ks', 'MarkerFaceColor','y', 'MarkerSize',8); hold on;
+plot(xA(goodA), log(yA(goodA)), 'o-', 'LineWidth',1.5);
+if nnz(goodA) >= 2
+    plot(xA(goodA), logyA_fit, '--', 'LineWidth',1.8);
+    legend('intersection', 'log(data)', ...
+           sprintf('linear fit: log(A) = %.3f c %+.3f', pA(1), pA(2)), ...
+           'Location','best');
+else
+    legend('intersection', 'log(data)', 'Location','best');
+end
+grid on;
+xlabel('cycle');
+ylabel('log(low-stretch area)');
+title(sprintf('Linearized decay: log(A) vs cycle | tau = %.3f cycles', tauA));
+xlim([cStar cycles]);
+
+%% ------------------------------------------------------------------------
+%%  Figure 6501: ALL LOW-STRETCH BLOBS TOTAL AREA using ACTUAL cycle axis
+%% ------------------------------------------------------------------------
+xB = (iStart:cycles)';          
+yB = total_low_blob_area_px_fullres(iStart:cycles);
+
+goodB = isfinite(xB) & isfinite(yB) & (yB > 0);
+
+if nnz(goodB) >= 2
+    pB = polyfit(xB(goodB), log(yB(goodB)), 1);   % log(A) = pB(1)*cycle + pB(2)
+    logyB_fit = polyval(pB, xB(goodB));
+    yB_fit    = exp(logyB_fit);
+
+    kB   = pB(1);
+    A0B  = exp(pB(2));
+    tauB = -1 / kB;
+else
+    pB = [NaN NaN];
+    logyB_fit = [];
+    yB_fit    = [];
+    kB = NaN; A0B = NaN; tauB = NaN;
+end
+
+% interpolated value exactly at the intersection cycle
+yB_cross = interp1(1:cycles, total_low_blob_area_px_fullres, cStar, 'linear', 'extrap');
+
+figure(6501); clf;
+set(gcf,'Color','w','Position',[120 560 1150 430], ...
+    'Name','All low-stretch blobs total area decay starting at actual blue/yellow intersection cycle');
+tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+
+% --- left: semilogy plot ---
+nexttile;
+semilogy(cStar, yB_cross, 'ks', 'MarkerFaceColor','y', 'MarkerSize',8); hold on;
+semilogy(xB(goodB), yB(goodB), 'o-', 'LineWidth',1.5);
+if nnz(goodB) >= 2
+    semilogy(xB(goodB), yB_fit, '--', 'LineWidth',1.8);
+    legend('intersection', 'data', ...
+           sprintf('exp fit: A = %.3e exp(%.3f c)', A0B, kB), ...
+           'Location','best');
+else
+    legend('intersection', 'data', 'Location','best');
+end
+grid on;
+xlabel('cycle');
+ylabel('total area of all low-stretch blobs (pixels)');
+title('All low-stretch blobs total area decay (semilogy, actual cycle axis)');
+xlim([cStar cycles]);
+
+% --- right: linearized log plot ---
+nexttile;
+plot(cStar, log(yB_cross), 'ks', 'MarkerFaceColor','y', 'MarkerSize',8); hold on;
+plot(xB(goodB), log(yB(goodB)), 'o-', 'LineWidth',1.5);
+if nnz(goodB) >= 2
+    plot(xB(goodB), logyB_fit, '--', 'LineWidth',1.8);
+    legend('intersection', 'log(data)', ...
+           sprintf('linear fit: log(A) = %.3f c %+.3f', pB(1), pB(2)), ...
+           'Location','best');
+else
+    legend('intersection', 'log(data)', 'Location','best');
+end
+grid on;
+xlabel('cycle');
+ylabel('log(total area of all low-stretch blobs)');
+title(sprintf('Linearized decay: log(A) vs cycle | tau = %.3f cycles', tauB));
+xlim([cStar cycles]);
+
+fprintf('Low-stretch area fit (actual cycle axis):            A = %.6e * exp(%.6f * c), tau = %.6f cycles\n', A0A, kA, tauA);
+fprintf('All low-stretch blobs total fit (actual cycle axis): A = %.6e * exp(%.6f * c), tau = %.6f cycles\n', A0B, kB, tauB);
 
 %% ========================================================================
 %%  E)  FINAL FULL-RESOLUTION BLOB ANALYSIS
@@ -1467,4 +1732,102 @@ function perim = compute_perimeter(BW)
                Pad(2:end-1,1:end-2) & ...
                Pad(2:end-1,3:end);
     perim = nnz(BW) - nnz(interior);
+end
+
+function SVDdata = fullSVD_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+%FULLSVD_SNAPSHOT
+% Stores the full SVD of the Nwin-step monodromy M at coarse S-field grid points.
+%
+% For each starting location:
+%     M = U * Sigma * V'
+%
+% Sigma(1,1) = strongest stretch = current S value
+% Sigma(2,2) = weaker singular value
+% V(:,1)     = starting direction that becomes most stretched
+% U(:,1)     = final direction of that strongest stretch
+%
+% Important:
+% Singular vectors have sign ambiguity: v and -v represent the same line.
+% So theta values are stored modulo pi.
+
+step = P.FIELD_STEP;
+
+ys = 1:step:H;
+xs = 1:step:W;
+
+Ny = numel(ys);
+Nx = numel(xs);
+
+Ufield      = nan(Ny, Nx, 2, 2);
+Vfield      = nan(Ny, Nx, 2, 2);
+Sigma_field = nan(Ny, Nx, 2);
+
+theta_u1 = nan(Ny, Nx);
+theta_v1 = nan(Ny, Nx);
+
+finalX = nan(Ny, Nx);
+finalY = nan(Ny, Nx);
+
+mask = false(Ny, Nx);
+
+for iy = 1:Ny
+    for ix = 1:Nx
+
+        y0 = double(ys(iy) - 1);   % zero-based dynamics coordinate
+        x0 = double(xs(ix) - 1);
+
+        [M_raw, xyNw] = kd_dyn_vert('monodromy_with_final', ...
+                                    y0, x0, t0, Nwin, ...
+                                    dp_x_hist, Tau, H, W, row0, ...
+                                    1e-3, true);
+
+        [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, P.DET_TOL);
+
+        if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw - 1) > P.DET_TOL
+            continue;
+        end
+
+        [Umat, Sigmat, Vmat] = svd(M_sym);
+
+        Ufield(iy,ix,:,:) = Umat;
+        Vfield(iy,ix,:,:) = Vmat;
+
+        Sigma_field(iy,ix,1) = Sigmat(1,1);
+        Sigma_field(iy,ix,2) = Sigmat(2,2);
+
+        % Direction angles of strongest-stretch singular vectors.
+        % Coordinates are [x; y], because M maps [dx; dy] -> [dx_N; dy_N].
+        theta_v1(iy,ix) = mod(atan2(Vmat(2,1), Vmat(1,1)), pi);
+        theta_u1(iy,ix) = mod(atan2(Umat(2,1), Umat(1,1)), pi);
+
+        finalX(iy,ix) = mod(xyNw(1), W) + 1;
+        finalY(iy,ix) = mod(xyNw(2), H) + 1;
+
+        mask(iy,ix) = true;
+    end
+end
+
+SVDdata = struct();
+
+SVDdata.xs = xs;
+SVDdata.ys = ys;
+
+SVDdata.t0   = t0;
+SVDdata.Nwin = Nwin;
+SVDdata.step = step;
+
+SVDdata.mask = mask;
+
+SVDdata.U = Ufield;
+SVDdata.V = Vfield;
+SVDdata.Sigma = Sigma_field;
+
+SVDdata.s1 = Sigma_field(:,:,1);
+SVDdata.s2 = Sigma_field(:,:,2);
+
+SVDdata.theta_v1 = theta_v1;
+SVDdata.theta_u1 = theta_u1;
+
+SVDdata.finalX = finalX;
+SVDdata.finalY = finalY;
 end
