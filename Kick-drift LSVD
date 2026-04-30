@@ -434,26 +434,26 @@ for it = 1:cycles
         % dots from your robust voting scheme
         [xyLow, xyHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, Pnow, rows, cols);
 
-        % ============ FIGURE: S-field at STARTING locations on kick-drift map ============
+        % ============ FIGURE: CURRENT-location S-field on cycle-0 frame ============
         figB = figure(3000 + it);
         set(figB,'Color','w','Position',[80 80 900 900], ...
-            'Name', sprintf('Cycle %d: S-field at STARTING locations (on kick-drift)', it));
+            'Name', sprintf('Cycle %d: CURRENT-location S-field on cycle-0 frame', it));
 
-        imshow(stage2_img, []);
+        imshow(img0, []);
         axis image off;
         hold on;
 
-        % overlay the magnitude map softly (this is the "contour plot on top")
-        if OVERLAY_S_FIELD_ON_DOTS && ~isempty(Sfine)
-            h2 = imagesc(Sfine);
-            set(h2,'AlphaData', SParams.FIELD_ALPHA * maskFine);
+        % overlay current-location magnitude map on top of the original (cycle-0) frame
+        if OVERLAY_S_FIELD_ON_DOTS && ~isempty(Sfine_final)
+            h2 = imagesc(Sfine_final);
+            set(h2,'AlphaData', SParams.FIELD_ALPHA * maskFine_final);
             caxis([1, SParams.S_CLIP_MAX]);
             colormap(figB, cmap_blue_yellow);
             % add ONLY the S=2 boundary to avoid squiggle-spam
-            contour(Sfine, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.1);
+            contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.1);
         end
 
-        % ---- ORANGE overlay on the kick-drift + dots plot (yellow->blue) ----
+        % ---- ORANGE overlay (yellow->blue transition) ----
         if SHOW_Y2B_ORANGE && any(y2bMask_final(:))
             overlay_mask_rgb(y2bMask_final, [1 0 1], min(0.60, SParams.TRANS_ALPHA + 0.10));
         end
@@ -463,7 +463,7 @@ for it = 1:cycles
             plot(xyLow(:,1), xyLow(:,2), '.', 'MarkerSize', 12, 'Color', [1 0.5 0]);
         end
 
-        title(sprintf(['cycle %d: S-field at STARTING locations (S<=%.2f) | Nwin=%d | ' ...
+        title(sprintf(['cycle %d: CURRENT-location S-field on cycle-0 frame (S<=%.2f) | Nwin=%d | ' ...
                        'low=%d, stretched=%d, passes=%d'], ...
               it, Pnow.S_THR, Pnow.Nwin, stats.n_low, stats.n_high, stats.passes));
 
