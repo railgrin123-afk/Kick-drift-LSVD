@@ -398,8 +398,8 @@ for it = 1:cycles
             0.00 0.45 0.00;   % 8: dark green       2.5<S<=2.7
             0.00 0.00 0.00;   % 9: black            2.7<S<=3.0
             0.40 0.00 0.55;   % 10: dark purple     3.0<S<=3.5
-            0.40 0.40 0.40;   % 11: dark gray       3.5<S<=4.0
-            0.15 0.15 0.15];  % 12: near-black      S>4.0
+            0.50 0.35 0.10;   % 11: diarrhea brown   3.5<S<=4.0
+            0.72 0.53 0.04];  % 12: deep goldenrod   S>4.0
 
         hIm = imagesc(double(Lband));
         axis image off;
