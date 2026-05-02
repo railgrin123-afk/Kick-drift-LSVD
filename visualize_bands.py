@@ -17,7 +17,7 @@ band_cmap = np.array([
     [0.00, 0.45, 0.00],   # 8: dark green       2.5<S<=2.7
     [0.00, 0.00, 0.00],   # 9: black            2.7<S<=3.0
     [0.40, 0.00, 0.55],   # 10: dark purple     3.0<S<=3.5
-    [0.50, 0.35, 0.10],   # 11: diarrhea brown  3.5<S<=4.0
+    [0.80, 0.93, 0.93],   # 11: eggshell blue   3.5<S<=4.0
     [0.72, 0.53, 0.04],   # 12: deep goldenrod  S>4.0
 ])
 
@@ -32,7 +32,7 @@ labels = [
     '2.5 < S ≤ 2.7\n(dark green)',
     '2.7 < S ≤ 3.0\n(black)',
     '3.0 < S ≤ 3.5\n(purple)',
-    '3.5 < S ≤ 4.0\n(brown)',
+    '3.5 < S ≤ 4.0\n(eggshell blue)',
     'S > 4.0\n(goldenrod)',
 ]
 
