@@ -402,19 +402,19 @@ for it = 1:cycles
             0.72 0.53 0.04];  % 12: deep goldenrod   S>4.0
 
         % ---- DOT colors (one per band) - chosen to contrast with band bg ----
+        %  1: S<1.5            cyan
+        %  2: 1.5<=S<1.8       magenta
+        %  3: 1.8<=S<2.0       bright orange
+        %  4: 2.0<S<=2.2       deep purple
+        %  5: 2.2<S<2.5        neon yellow
+        %  6: 2.5<=S<=3.0      white
         dot_cmap = [...
-            0.00 1.00 1.00;   % 1: cyan            (on red bg)
-            0.00 0.00 0.60;   % 2: navy            (on orange-red bg)
-            0.40 1.00 0.00;   % 3: lime            (on hot pink bg)
-            1.00 0.00 0.80;   % 4: magenta         (on green bg)
-            1.00 0.50 0.00;   % 5: bright orange   (on teal bg)
-            0.50 0.00 0.70;   % 6: deep purple     (on yellow bg)
-            1.00 1.00 0.20;   % 7: neon yellow     (on dark blue bg)
-            1.00 0.40 0.80;   % 8: hot pink        (on dark green bg)
-            1.00 1.00 1.00;   % 9: white           (on black bg)
-            0.70 1.00 0.30;   % 10: yellow-green   (on purple bg)
-            0.80 0.00 0.00;   % 11: deep red       (on eggshell blue bg)
-            0.10 0.30 1.00];  % 12: electric blue  (on goldenrod bg)
+            0.00 1.00 1.00;   % 1: cyan            (S<1.5)
+            1.00 0.00 0.80;   % 2: magenta         (1.5<=S<1.8)
+            1.00 0.50 0.00;   % 3: bright orange   (1.8<=S<2.0)
+            0.50 0.00 0.70;   % 4: deep purple     (2.0<S<=2.2)
+            1.00 1.00 0.20;   % 5: neon yellow     (2.2<S<2.5)
+            1.00 1.00 1.00];  % 6: white           (2.5<=S<=3.0)
 
         hIm = imagesc(double(Lband));
         axis image off;
@@ -1889,21 +1889,16 @@ iy = max(1, min(H, round(xyAll(:,2))));
 lin = sub2ind([H W], iy, ix);
 dot_S = Sfine_final(lin);
 
+% Only 6 selected ranges get dots; everything else (S>=3.0 and NaN) is skipped.
 band = zeros(N, 1);
-band(dot_S <  1.0)                        = 1;
-band(dot_S >= 1.0 & dot_S <  1.3)         = 2;
-band(dot_S >= 1.3 & dot_S <  1.5)         = 3;
-band(dot_S >= 1.5 & dot_S <  1.8)         = 4;
-band(dot_S >= 1.8 & dot_S <= 2.0)         = 5;
-band(dot_S >  2.0 & dot_S <= 2.2)         = 6;
-band(dot_S >  2.2 & dot_S <= 2.5)         = 7;
-band(dot_S >  2.5 & dot_S <= 2.7)         = 8;
-band(dot_S >  2.7 & dot_S <= 3.0)         = 9;
-band(dot_S >  3.0 & dot_S <= 3.5)         = 10;
-band(dot_S >  3.5 & dot_S <= 4.0)         = 11;
-band(dot_S >  4.0)                        = 12;
+band(dot_S <  1.5)                        = 1;
+band(dot_S >= 1.5 & dot_S <  1.8)         = 2;
+band(dot_S >= 1.8 & dot_S <  2.0)         = 3;
+band(dot_S >  2.0 & dot_S <= 2.2)         = 4;
+band(dot_S >  2.2 & dot_S <  2.5)         = 5;
+band(dot_S >= 2.5 & dot_S <= 3.0)         = 6;
 
-for b = 1:12
+for b = 1:6
     sel = (band == b);
     if any(sel)
         plot(xyAll(sel,1), xyAll(sel,2), '.', ...
