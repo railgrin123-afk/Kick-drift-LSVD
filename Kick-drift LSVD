@@ -362,33 +362,62 @@ for it = 1:cycles
 
         figS = figure(5000 + it); clf;
         set(figS,'Color','w','Position',[1000 80 900 900], ...
-            'Name', sprintf('Cycle %d: S-field at STARTING locations', it));
+            'Name', sprintf('Cycle %d: S-field at CURRENT locations (multi-level contours)', it));
 
-        % show magnitude map of S vs where we started
-        hIm = imagesc(Sfine);
+        % show magnitude map of S vs CURRENT (final) location
+        hIm = imagesc(Sfine_final);
         axis image off;
-        set(hIm,'AlphaData', 1.0 * maskFine);    % hide NaN regions cleanly
+        set(hIm,'AlphaData', 1.0 * maskFine_final);    % hide NaN regions cleanly
         caxis([1, SParams.S_CLIP_MAX]);
         colormap(figS, cmap_blue_yellow);
         colorbar;
-        title(sprintf('cycle %d: S at STARTING location (x_0,y_0) | Nwin=%d, t0=%d  [clipped at %.1f]', ...
+        title(sprintf('cycle %d: S at CURRENT location (x_N,y_N) | Nwin=%d, t0=%d  [clipped at %.1f]', ...
               it, Nw, t0_recent, SParams.S_CLIP_MAX));
 
         hold on;
-        % ---- ORANGE overlay on S-field plot (yellow->blue) ----
+        % ---- MAGENTA overlay (yellow->blue transition, kept) ----
         if SHOW_Y2B_ORANGE && any(y2bMask_final(:))
             overlay_mask_rgb(y2bMask_final, [1 0 1], SParams.TRANS_ALPHA);
         end
 
-        if SParams.SHOW_ONLY_THR_CONTOUR
-            contour(Sfine, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.2);
-         
-        else
-            % if you ever want more levels, keep it sparse:
-            contour(Sfine, [1.2 1.5 2.0 3.0 4.0], 'w', 'LineWidth', 0.8);
-            
+        % ---- existing white S = S_THR (= 2) contour, kept and drawn thick ----
+        [~, h_thr] = contour(Sfine_final, [SParams.S_THR SParams.S_THR], ...
+                             'LineWidth', 1.8, 'LineColor', [1 1 1]);
+
+        % ---- additional high-contrast contour levels ----
+        % Levels in low-stretch (S<2) zone use bright/warm colors that pop
+        % against the dark teal background.  Levels in high-stretch (S>2)
+        % zone use dark colors that pop against the bright yellow background.
+        extra_levels = [1.0  1.3  1.5  1.8  2.2  2.5  2.7  3.0  3.5  4.0];
+        extra_colors = [...
+            1.00 0.00 0.00;   % S=1.0  red
+            1.00 0.45 0.00;   % S=1.3  orange-red
+            1.00 0.20 0.65;   % S=1.5  hot pink
+            0.20 1.00 0.30;   % S=1.8  bright green
+            0.55 0.00 0.00;   % S=2.2  dark red
+            0.00 0.00 0.70;   % S=2.5  dark blue
+            0.00 0.45 0.00;   % S=2.7  dark green
+            0.00 0.00 0.00;   % S=3.0  black
+            0.40 0.00 0.55;   % S=3.5  dark purple
+            0.40 0.40 0.40];  % S=4.0  dark gray
+
+        h_extra = gobjects(numel(extra_levels), 1);
+        for li = 1:numel(extra_levels)
+            [~, hC] = contour(Sfine_final, [extra_levels(li) extra_levels(li)], ...
+                              'LineWidth', 1.1, 'LineColor', extra_colors(li,:));
+            h_extra(li) = hC;
         end
-       
+
+        % redraw S=2 line on top of the extras so the threshold remains the most visible
+        uistack(h_thr, 'top');
+
+        % legend listing all extra levels (S=2 already shown thick in white)
+        labels = arrayfun(@(s) sprintf('S = %.1f', s), extra_levels, ...
+                          'UniformOutput', false);
+        leg = legend(h_extra, labels, 'Location','eastoutside', ...
+                     'NumColumns', 1, 'TextColor','k', 'Color','w');
+        leg.Title.String = 'extra contours';
+
         hold off;
         drawnow;
 
