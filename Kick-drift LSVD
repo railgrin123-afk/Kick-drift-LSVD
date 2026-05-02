@@ -362,61 +362,62 @@ for it = 1:cycles
 
         figS = figure(5000 + it); clf;
         set(figS,'Color','w','Position',[1000 80 900 900], ...
-            'Name', sprintf('Cycle %d: S-field at CURRENT locations (multi-level contours)', it));
+            'Name', sprintf('Cycle %d: S-field at CURRENT locations (banded regions)', it));
 
-        % show magnitude map of S vs CURRENT (final) location
-        hIm = imagesc(Sfine_final);
+        % ---- build a discrete band label image from Sfine_final ----
+        %   1: S<1.0           7: 2.2<S<=2.5
+        %   2: 1.0<=S<1.3      8: 2.5<S<=2.7
+        %   3: 1.3<=S<1.5      9: 2.7<S<=3.0
+        %   4: 1.5<=S<1.8      10: 3.0<S<=3.5
+        %   5: 1.8<=S<=2.0     11: 3.5<S<=4.0
+        %   6: 2.0<S<=2.2      12: S>4.0
+        Sf = Sfine_final;
+        Mf = maskFine_final;
+        Lband = zeros(size(Sf), 'uint8');
+        Lband(Mf & Sf <  1.0)                        = 1;
+        Lband(Mf & Sf >= 1.0 & Sf <  1.3)            = 2;
+        Lband(Mf & Sf >= 1.3 & Sf <  1.5)            = 3;
+        Lband(Mf & Sf >= 1.5 & Sf <  1.8)            = 4;
+        Lband(Mf & Sf >= 1.8 & Sf <= 2.0)            = 5;
+        Lband(Mf & Sf >  2.0 & Sf <= 2.2)            = 6;
+        Lband(Mf & Sf >  2.2 & Sf <= 2.5)            = 7;
+        Lband(Mf & Sf >  2.5 & Sf <= 2.7)            = 8;
+        Lband(Mf & Sf >  2.7 & Sf <= 3.0)            = 9;
+        Lband(Mf & Sf >  3.0 & Sf <= 3.5)            = 10;
+        Lband(Mf & Sf >  3.5 & Sf <= 4.0)            = 11;
+        Lband(Mf & Sf >  4.0)                         = 12;
+
+        band_cmap = [...
+            1.00 0.00 0.00;   % 1: bright red       S<1.0
+            1.00 0.45 0.00;   % 2: orange-red       1.0<=S<1.3
+            1.00 0.20 0.65;   % 3: hot pink         1.3<=S<1.5
+            0.20 1.00 0.30;   % 4: bright green     1.5<=S<1.8
+            0.13 0.57 0.69;   % 5: dark teal        1.8<=S<=2.0
+            0.99 0.91 0.14;   % 6: yellow           2.0<S<=2.2
+            0.00 0.00 0.70;   % 7: dark blue        2.2<S<=2.5
+            0.00 0.45 0.00;   % 8: dark green       2.5<S<=2.7
+            0.00 0.00 0.00;   % 9: black            2.7<S<=3.0
+            0.40 0.00 0.55;   % 10: dark purple     3.0<S<=3.5
+            0.40 0.40 0.40;   % 11: dark gray       3.5<S<=4.0
+            0.15 0.15 0.15];  % 12: near-black      S>4.0
+
+        hIm = imagesc(double(Lband));
         axis image off;
-        set(hIm,'AlphaData', 1.0 * maskFine_final);    % hide NaN regions cleanly
-        caxis([1, SParams.S_CLIP_MAX]);
-        colormap(figS, cmap_blue_yellow);
-        colorbar;
-        title(sprintf('cycle %d: S at CURRENT location (x_N,y_N) | Nwin=%d, t0=%d  [clipped at %.1f]', ...
-              it, Nw, t0_recent, SParams.S_CLIP_MAX));
+        set(hIm,'AlphaData', 1.0 * (Lband > 0));   % transparent outside any band
+        colormap(figS, band_cmap);
+        caxis([0.5, 12.5]);
+        cb = colorbar;
+        cb.Ticks      = 1:12;
+        cb.TickLabels = {'S<1.0','1.0-1.3','1.3-1.5','1.5-1.8','1.8-2.0', ...
+                         '2.0-2.2','2.2-2.5','2.5-2.7','2.7-3.0','3.0-3.5', ...
+                         '3.5-4.0','S>4.0'};
+        title(sprintf('cycle %d: S at CURRENT location (x_N,y_N) - banded regions | Nwin=%d, t0=%d', ...
+              it, Nw, t0_recent));
 
         hold on;
-        % ---- MAGENTA overlay (yellow->blue transition, kept) ----
-        if SHOW_Y2B_ORANGE && any(y2bMask_final(:))
-            overlay_mask_rgb(y2bMask_final, [1 0 1], SParams.TRANS_ALPHA);
-        end
-
-        % ---- existing white S = S_THR (= 2) contour, kept and drawn thick ----
-        [~, h_thr] = contour(Sfine_final, [SParams.S_THR SParams.S_THR], ...
-                             'LineWidth', 1.8, 'LineColor', [1 1 1]);
-
-        % ---- additional high-contrast contour levels ----
-        % Levels in low-stretch (S<2) zone use bright/warm colors that pop
-        % against the dark teal background.  Levels in high-stretch (S>2)
-        % zone use dark colors that pop against the bright yellow background.
-        extra_levels = [1.0  1.3  1.5  1.8  2.2  2.5  2.7  3.0  3.5  4.0];
-        extra_colors = [...
-            1.00 0.00 0.00;   % S=1.0  red
-            1.00 0.45 0.00;   % S=1.3  orange-red
-            1.00 0.20 0.65;   % S=1.5  hot pink
-            0.20 1.00 0.30;   % S=1.8  bright green
-            0.55 0.00 0.00;   % S=2.2  dark red
-            0.00 0.00 0.70;   % S=2.5  dark blue
-            0.00 0.45 0.00;   % S=2.7  dark green
-            0.00 0.00 0.00;   % S=3.0  black
-            0.40 0.00 0.55;   % S=3.5  dark purple
-            0.40 0.40 0.40];  % S=4.0  dark gray
-
-        h_extra = gobjects(numel(extra_levels), 1);
-        for li = 1:numel(extra_levels)
-            [~, hC] = contour(Sfine_final, [extra_levels(li) extra_levels(li)], ...
-                              'LineWidth', 1.1, 'LineColor', extra_colors(li,:));
-            h_extra(li) = hC;
-        end
-
-        % redraw S=2 line on top of the extras so the threshold remains the most visible
-        uistack(h_thr, 'top');
-
-        % legend listing all extra levels (S=2 already shown thick in white)
-        labels = arrayfun(@(s) sprintf('S = %.1f', s), extra_levels, ...
-                          'UniformOutput', false);
-        leg = legend(h_extra, labels, 'Location','eastoutside', ...
-                     'NumColumns', 1, 'TextColor','k', 'Color','w');
-        leg.Title.String = 'extra contours';
+        % ---- white S = 2 boundary line on top ----
+        contour(Sfine_final, [SParams.S_THR SParams.S_THR], ...
+                'LineWidth', 1.8, 'LineColor', [1 1 1]);
 
         hold off;
         drawnow;
