@@ -1196,20 +1196,29 @@ hold on;
 contour(Sfin, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth',1.5);
 % semi-transparent coloured fill + text label for each blob
 cmap_blobs = lines(max(nF,1));
-for k = 1:nF
-    BW_blob = false(H_im, W_im);
-    BW_blob(CC_sorted{k}) = true;
-    rgb_im        = zeros(H_im, W_im, 3);
-    rgb_im(:,:,1) = cmap_blobs(k,1);
-    rgb_im(:,:,2) = cmap_blobs(k,2);
-    rgb_im(:,:,3) = cmap_blobs(k,3);
-    hB = image(rgb_im);
-    set(hB,'AlphaData', 0.35 * double(BW_blob));
-    text(blob_cx(k), blob_cy(k), ...
-         sprintf('#%d\n%dpx\nr=%.1f', k, blob_area(k), blob_r_eq(k)), ...
-         'Color','w','FontSize',7,'FontWeight','bold', ...
-         'HorizontalAlignment','center','VerticalAlignment','middle', ...
-         'BackgroundColor',[0 0 0 0.4]);
+if nF > 0
+    % build a single label image: pixel value = blob rank (1..nF)
+    if nF < 65535
+        label_img_fin = zeros(H_im, W_im, 'uint16');
+    else
+        label_img_fin = zeros(H_im, W_im, 'uint32');
+    end
+    for k = 1:nF
+        label_img_fin(CC_sorted{k}) = k;
+    end
+    blob_mask_fin = label_img_fin > 0;
+    rgb_overlay_fin = ind2rgb(label_img_fin, [0 0 0; cmap_blobs]);
+    hB_fin = image(rgb_overlay_fin);
+    set(hB_fin,'AlphaData', 0.35 * double(blob_mask_fin));
+    clear rgb_overlay_fin label_img_fin blob_mask_fin;
+
+    for k = 1:nF
+        text(blob_cx(k), blob_cy(k), ...
+             sprintf('#%d\n%dpx\nr=%.1f', k, blob_area(k), blob_r_eq(k)), ...
+             'Color','w','FontSize',7,'FontWeight','bold', ...
+             'HorizontalAlignment','center','VerticalAlignment','middle', ...
+             'BackgroundColor',[0 0 0 0.4]);
+    end
 end
 hold off; drawnow;
 
