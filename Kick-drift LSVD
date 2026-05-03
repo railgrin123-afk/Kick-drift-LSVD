@@ -1059,8 +1059,9 @@ Tcur_fin = numel(dp_x_hist);
 Nw_fin   = min(SParams.Nwin, Tcur_fin);
 t0_fin   = max(0, Tcur_fin - Nw_fin);
 
-[Sfin, maskFin] = compute_s1_field(dp_x_hist, row0, Tau, rows, cols, ...
-                                   t0_fin, Nw_fin, SParams);
+% Use Sfield_snapshot to get FINAL-location S-field (consistent with per-cycle plots)
+[~, ~, Sfin, maskFin] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+                                        t0_fin, Nw_fin, SParams);
 
 valid_fin     = maskFin & isfinite(Sfin);
 low_mask_fin  = valid_fin & (Sfin <= SParams.S_THR);
@@ -1188,7 +1189,7 @@ set(hIm,'AlphaData', double(maskFin));
 axis image off;
 caxis([0.9, SParams.S_CLIP_MAX]);
 colormap(gca, cmap_blue_yellow); colorbar;
-title(sprintf('Final s_1(x_0,y_0)  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs', ...
+title(sprintf('Final s_1(x_N,y_N)  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs  [FINAL location]', ...
               SParams.S_THR, Nw_fin, nF));
 hold on;
 % draw S=S_THR boundary
