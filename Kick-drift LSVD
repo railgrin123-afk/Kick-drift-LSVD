@@ -472,9 +472,9 @@ for it = 1:cycles
             Svals = Sfine_final(maskFine_final & isfinite(Sfine_final));
 
             figH = figure(7000 + it); clf;
-            set(figH,'Color','w','Position',[80 540 1500 420], ...
+            set(figH,'Color','w','Position',[80 540 1900 420], ...
                 'Name', sprintf('Cycle %d: S-distribution histograms', it));
-            tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
+            tiledlayout(1,4,'TileSpacing','compact','Padding','compact');
 
             % --- Panel 1: 0 <= S <= 2.0 (low-stretch zone) ---
             nexttile;
@@ -529,8 +529,44 @@ for it = 1:cycles
             xlabel('S level'); ylabel('pixel count');
             title(sprintf('Extreme (S > 6.0)  n=%d', numel(seg3)));
 
-            sgtitle(sprintf('Cycle %d: S-level distributions  (total valid=%d)', ...
-                    it, numel(Svals)), 'FontWeight','bold');
+            % --- Panel 4: 0 <= S <= 2.0  COLOR-CLASSIFIED by rendered cmap color ---
+            % Each S<=2 pixel is classified by what color the cmap_blue_yellow
+            % colormap actually renders it as (using current caxis range):
+            %   - if R > B in the rendered RGB -> "yellow-leaning" -> orange bar
+            %   - if R <= B                    -> "teal-leaning"   -> blue bar
+            nexttile;
+            seg4 = Svals(Svals >= 0 & Svals <= 2.0);
+            edges4 = 0:0.05:2.0;
+            cax_lo = 0.9;  cax_hi = SParams.S_CLIP_MAX;
+            tvals = (seg4 - cax_lo) / max(eps, (cax_hi - cax_lo));
+            tvals = min(1, max(0, tvals));
+            % rendered RGB at each pixel using the same formula as cmap_blue_yellow
+            R4 = 0.0 *(1-tvals).^2 + 0.129*2.*tvals.*(1-tvals) + 0.993*tvals.^2;
+            B4 = 0.35*(1-tvals).^2 + 0.692*2.*tvals.*(1-tvals) + 0.144*tvals.^2;
+            yellow_mask = (R4 > B4);
+            seg4_yellow = seg4(yellow_mask);
+            seg4_teal   = seg4(~yellow_mask);
+
+            % bin both groups on the same edges, then stack
+            counts_teal   = histcounts(seg4_teal,   edges4);
+            counts_yellow = histcounts(seg4_yellow, edges4);
+            centers4 = 0.5*(edges4(1:end-1)+edges4(2:end));
+            hb = bar(centers4, [counts_teal; counts_yellow]', ...
+                     'stacked', 'BarWidth', 1.0, 'EdgeColor','none');
+            hb(1).FaceColor = [0.20 0.45 0.85];   % teal-side -> blue bar
+            hb(2).FaceColor = [0.95 0.55 0.10];   % yellow-side -> orange bar
+            hold on;
+            xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
+                  'Label','S=2.0','LabelHorizontalAlignment','left');
+            xlim([0 2.0]); grid on;
+            xlabel('S level'); ylabel('pixel count');
+            title(sprintf('S<=2 by rendered color  teal=%d  yellow-spill=%d', ...
+                          numel(seg4_teal), numel(seg4_yellow)));
+            legend({'teal-side (R<=B)','yellow-spill (R>B)'}, ...
+                   'Location','northeast','FontSize',8);
+
+            sgtitle(sprintf('Cycle %d: S-level distributions  (total valid=%d)  caxis=[%.2f, %.2f]', ...
+                    it, numel(Svals), cax_lo, cax_hi), 'FontWeight','bold');
             drawnow;
         end
     else
