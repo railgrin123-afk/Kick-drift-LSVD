@@ -598,6 +598,53 @@ for it = 1:cycles
             sgtitle(sprintf('Cycle %d: S-level distributions  (total valid=%d)  caxis=[%.2f, %.2f]', ...
                     it, numel(Svals), cax_lo, cax_hi), 'FontWeight','bold');
             drawnow;
+
+            % ---- PER-CYCLE BLOB MAP (mirrors final blob figure 7001) ----
+            figBlob = figure(8000 + it); clf;
+            set(figBlob,'Color','w','Position',[100 60 1100 950], ...
+                'Name', sprintf('Cycle %d: S-field + numbered low-stretch blobs', it));
+            hImB = imagesc(Sfine_final);
+            set(hImB,'AlphaData', double(maskFine_final));
+            axis image off;
+            caxis([0.9, SParams.S_CLIP_MAX]);
+            colormap(gca, cmap_blue_yellow); colorbar;
+
+            nB_cyc = numel(CC_low_cycle);
+            title(sprintf('cycle %d: s_1(x_0,y_0)  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs', ...
+                          it, SParams.S_THR, Nw, nB_cyc));
+            hold on;
+            % S=S_THR boundary
+            contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.5);
+
+            % sort blobs by area (largest first) and overlay numbered labels
+            if nB_cyc > 0
+                areas_cyc = cellfun(@numel, CC_low_cycle(:));
+                [areas_sorted, sort_idx] = sort(areas_cyc, 'descend');
+                cmap_blobs_cyc = lines(max(nB_cyc,1));
+                [Hc, Wc] = size(maskFine_final);
+                for k = 1:nB_cyc
+                    idx_lin_k = CC_low_cycle{sort_idx(k)};
+                    BW_k = false(Hc, Wc);
+                    BW_k(idx_lin_k) = true;
+                    rgb_k = zeros(Hc, Wc, 3);
+                    rgb_k(:,:,1) = cmap_blobs_cyc(k,1);
+                    rgb_k(:,:,2) = cmap_blobs_cyc(k,2);
+                    rgb_k(:,:,3) = cmap_blobs_cyc(k,3);
+                    hBk = image(rgb_k);
+                    set(hBk,'AlphaData', 0.35 * double(BW_k));
+
+                    [ry_k, rx_k] = ind2sub([Hc Wc], idx_lin_k);
+                    cx_k = mean(rx_k);  cy_k = mean(ry_k);
+                    A_k  = areas_sorted(k);
+                    r_eq_k = sqrt(A_k / pi);
+                    text(cx_k, cy_k, ...
+                         sprintf('#%d\n%dpx\nr=%.1f', k, A_k, r_eq_k), ...
+                         'Color','w','FontSize',7,'FontWeight','bold', ...
+                         'HorizontalAlignment','center','VerticalAlignment','middle', ...
+                         'BackgroundColor',[0 0 0 0.4]);
+                end
+            end
+            hold off; drawnow;
         end
     else
         Sfine = []; maskFine = [];
