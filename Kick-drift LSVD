@@ -622,17 +622,25 @@ for it = 1:cycles
                 [areas_sorted, sort_idx] = sort(areas_cyc, 'descend');
                 cmap_blobs_cyc = lines(max(nB_cyc,1));
                 [Hc, Wc] = size(maskFine_final);
+
+                % build a single label image: pixel value = blob rank (1..nB_cyc)
+                if nB_cyc < 65535
+                    label_img = zeros(Hc, Wc, 'uint16');
+                else
+                    label_img = zeros(Hc, Wc, 'uint32');
+                end
+                for k = 1:nB_cyc
+                    label_img(CC_low_cycle{sort_idx(k)}) = k;
+                end
+                blob_mask_all = label_img > 0;
+                rgb_overlay = ind2rgb(label_img, [0 0 0; cmap_blobs_cyc]);
+                hBk = image(rgb_overlay);
+                set(hBk,'AlphaData', 0.35 * double(blob_mask_all));
+                clear rgb_overlay label_img blob_mask_all;
+
+                % numbered text labels at each blob centroid
                 for k = 1:nB_cyc
                     idx_lin_k = CC_low_cycle{sort_idx(k)};
-                    BW_k = false(Hc, Wc);
-                    BW_k(idx_lin_k) = true;
-                    rgb_k = zeros(Hc, Wc, 3);
-                    rgb_k(:,:,1) = cmap_blobs_cyc(k,1);
-                    rgb_k(:,:,2) = cmap_blobs_cyc(k,2);
-                    rgb_k(:,:,3) = cmap_blobs_cyc(k,3);
-                    hBk = image(rgb_k);
-                    set(hBk,'AlphaData', 0.35 * double(BW_k));
-
                     [ry_k, rx_k] = ind2sub([Hc Wc], idx_lin_k);
                     cx_k = mean(rx_k);  cy_k = mean(ry_k);
                     A_k  = areas_sorted(k);
