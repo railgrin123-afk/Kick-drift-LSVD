@@ -472,9 +472,9 @@ for it = 1:cycles
             Svals = Sfine_final(maskFine_final & isfinite(Sfine_final));
 
             figH = figure(7000 + it); clf;
-            set(figH,'Color','w','Position',[80 540 1900 420], ...
+            set(figH,'Color','w','Position',[80 540 2350 420], ...
                 'Name', sprintf('Cycle %d: S-distribution histograms', it));
-            tiledlayout(1,4,'TileSpacing','compact','Padding','compact');
+            tiledlayout(1,5,'TileSpacing','compact','Padding','compact');
 
             % --- Panel 1: 0 <= S <= 2.0 (low-stretch zone) ---
             nexttile;
@@ -563,6 +563,36 @@ for it = 1:cycles
             title(sprintf('S<=2 by rendered color  teal=%d  yellow-spill=%d', ...
                           numel(seg4_teal), numel(seg4_yellow)));
             legend({'teal-side (R<=B)','yellow-spill (R>B)'}, ...
+                   'Location','northeast','FontSize',8);
+
+            % --- Panel 5: 2.0 < S <= 5.5  COLOR-CLASSIFIED (reverse spillage) ---
+            % Check if high-stretch pixels incorrectly render as teal
+            nexttile;
+            seg5 = Svals(Svals > 2.0 & Svals <= 5.5);
+            edges5 = 2.0:0.1:5.5;
+            tvals5 = (seg5 - cax_lo) / max(eps, (cax_hi - cax_lo));
+            tvals5 = min(1, max(0, tvals5));
+            R5 = 0.0 *(1-tvals5).^2 + 0.129*2.*tvals5.*(1-tvals5) + 0.993*tvals5.^2;
+            B5 = 0.35*(1-tvals5).^2 + 0.692*2.*tvals5.*(1-tvals5) + 0.144*tvals5.^2;
+            teal_mask5 = (R5 <= B5);
+            seg5_teal   = seg5(teal_mask5);
+            seg5_yellow = seg5(~teal_mask5);
+
+            counts_teal5   = histcounts(seg5_teal,   edges5);
+            counts_yellow5 = histcounts(seg5_yellow, edges5);
+            centers5 = 0.5*(edges5(1:end-1)+edges5(2:end));
+            hb5 = bar(centers5, [counts_teal5; counts_yellow5]', ...
+                      'stacked', 'BarWidth', 1.0, 'EdgeColor','none');
+            hb5(1).FaceColor = [0.20 0.45 0.85];   % teal-side -> blue bar
+            hb5(2).FaceColor = [0.95 0.55 0.10];   % yellow-side -> orange bar
+            hold on;
+            xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
+                  'Label','S=2.0','LabelHorizontalAlignment','right');
+            xlim([2.0 5.5]); grid on;
+            xlabel('S level'); ylabel('pixel count');
+            title(sprintf('2.0<S<=5.5 by rendered color  yellow=%d  blue-spill=%d', ...
+                          numel(seg5_yellow), numel(seg5_teal)));
+            legend({'blue-spill (R<=B)','yellow-side (R>B)'}, ...
                    'Location','northeast','FontSize',8);
 
             sgtitle(sprintf('Cycle %d: S-level distributions  (total valid=%d)  caxis=[%.2f, %.2f]', ...
