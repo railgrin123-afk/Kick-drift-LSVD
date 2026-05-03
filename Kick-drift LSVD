@@ -407,14 +407,14 @@ for it = 1:cycles
         %  3: 1.8<=S<2.0       neon orange (brighter)
         %  4: 2.0<S<=2.2       brown
         %  5: 2.2<S<2.5        bright red
-        %  6: 2.5<=S<=3.0      gold
+        %  6: 2.5<=S<=3.0      teal
         dot_cmap = [...
             0.00 1.00 1.00;   % 1: cyan            (S<1.5)
             0.40 1.00 0.00;   % 2: lime green      (1.5<=S<1.8)
             1.00 0.65 0.00;   % 3: neon orange     (1.8<=S<2.0)
             0.55 0.27 0.07;   % 4: brown           (2.0<S<=2.2)
             1.00 0.00 0.00;   % 5: bright red      (2.2<S<2.5)
-            1.00 0.85 0.00];  % 6: gold            (2.5<=S<=3.0)
+            0.00 0.70 0.80];  % 6: teal            (2.5<=S<=3.0)
 
         hIm = imagesc(double(Lband));
         axis image off;
