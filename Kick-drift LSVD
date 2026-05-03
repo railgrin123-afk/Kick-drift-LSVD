@@ -466,6 +466,73 @@ for it = 1:cycles
             hold off;
             drawnow;
         end
+
+        % ---- 3-PANEL HISTOGRAM of S distribution per cycle ----
+        if ~isempty(Sfine_final)
+            Svals = Sfine_final(maskFine_final & isfinite(Sfine_final));
+
+            figH = figure(7000 + it); clf;
+            set(figH,'Color','w','Position',[80 540 1500 420], ...
+                'Name', sprintf('Cycle %d: S-distribution histograms', it));
+            tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
+
+            % --- Panel 1: 0 <= S <= 2.0 (low-stretch zone) ---
+            nexttile;
+            seg1 = Svals(Svals >= 0 & Svals <= 2.0);
+            edges1 = 0:0.05:2.0;
+            histogram(seg1, edges1, 'FaceColor', [0.20 0.45 0.85], 'EdgeColor','none');
+            hold on;
+            if ~isempty(seg1)
+                xline(mean(seg1), '--', 'Color',[0.0 0.2 0.6], 'LineWidth',1.5, ...
+                      'Label', sprintf('mean=%.3f', mean(seg1)), ...
+                      'LabelHorizontalAlignment','left');
+            end
+            xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
+                  'Label','S=2.0 threshold','LabelHorizontalAlignment','left');
+            xlim([0 2.0]); grid on;
+            xlabel('S level'); ylabel('pixel count');
+            title(sprintf('Low-stretch (0 <= S <= 2.0)  n=%d', numel(seg1)));
+
+            % --- Panel 2: 2.0 < S <= 6.0 (high-stretch zone) ---
+            nexttile;
+            seg2 = Svals(Svals > 2.0 & Svals <= 6.0);
+            edges2 = 2.0:0.1:6.0;
+            histogram(seg2, edges2, 'FaceColor', [0.95 0.55 0.10], 'EdgeColor','none');
+            hold on;
+            if ~isempty(seg2)
+                xline(mean(seg2), '--', 'Color',[0.6 0.25 0.0], 'LineWidth',1.5, ...
+                      'Label', sprintf('mean=%.3f', mean(seg2)), ...
+                      'LabelHorizontalAlignment','left');
+            end
+            xlim([2.0 6.0]); grid on;
+            xlabel('S level'); ylabel('pixel count');
+            title(sprintf('High-stretch (2.0 < S <= 6.0)  n=%d', numel(seg2)));
+
+            % --- Panel 3: S > 6.0 (extreme stretch) - upper limit auto-chosen ---
+            nexttile;
+            seg3 = Svals(Svals > 6.0);
+            if ~isempty(seg3)
+                upper3 = min(max(seg3), 100);   % cap at 100 for sanity
+                edges3 = 6.0:max(0.25,(upper3-6)/40):upper3;
+            else
+                upper3 = 30;
+                edges3 = 6:1:upper3;
+            end
+            histogram(seg3, edges3, 'FaceColor', [0.85 0.10 0.10], 'EdgeColor','none');
+            hold on;
+            if ~isempty(seg3)
+                xline(mean(seg3), '--', 'Color',[0.5 0 0], 'LineWidth',1.5, ...
+                      'Label', sprintf('mean=%.3f', mean(seg3)), ...
+                      'LabelHorizontalAlignment','left');
+            end
+            xlim([6.0 upper3]); grid on;
+            xlabel('S level'); ylabel('pixel count');
+            title(sprintf('Extreme (S > 6.0)  n=%d', numel(seg3)));
+
+            sgtitle(sprintf('Cycle %d: S-level distributions  (total valid=%d)', ...
+                    it, numel(Svals)), 'FontWeight','bold');
+            drawnow;
+        end
     else
         Sfine = []; maskFine = [];
         Sfine_final = []; maskFine_final = [];
