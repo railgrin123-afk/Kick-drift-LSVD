@@ -1424,8 +1424,8 @@ Sfine = interp2(Xc, Yc, Ssm, Xf, Yf, 'linear', NaN);
 maskFine = isfinite(Sfine);
 
 % Clip for display (magnitude still correct, just not blown out visually)
-Sfine(Sfine < 1) = 1;
-Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
+% REMOVED: Sfine(Sfine < 1) = 1;
+% REMOVED: Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 
 % ---- FINAL-location S-field (scattered interpolation) ----
 % Each coarse probe started at (xs(ix), ys(iy)) and ended at
@@ -1449,9 +1449,9 @@ if numel(Svals) >= 4
     Sfine_final = smooth2_gaussian_nan(Sfine_final, maskF_raw, P.FIELD_SMOOTH_SIG);
     maskFine_final = isfinite(Sfine_final);
 
-    % Clip for display
-    Sfine_final(Sfine_final < 1) = 1;
-    Sfine_final(Sfine_final > P.S_CLIP_MAX) = P.S_CLIP_MAX;
+    % Clip for display (REMOVED to preserve full data range)
+    % REMOVED: Sfine_final(Sfine_final < 1) = 1;
+    % REMOVED: Sfine_final(Sfine_final > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 else
     Sfine_final = nan(H, W);
     maskFine_final = false(H, W);
@@ -1767,9 +1767,9 @@ function [Sfine, maskFine] = compute_s1_field(dp_x_hist, row0, Tau, H, W, t0, Nw
     Sfine    = interp2(Xc, Yc, s1S, Xf, Yf, 'linear', NaN);
     maskFine = isfinite(Sfine);
 
-    % Clip display range
-    Sfine(Sfine < 1)            = 1;
-    Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
+    % Clip display range (REMOVED to preserve full data range)
+    % REMOVED: Sfine(Sfine < 1)            = 1;
+    % REMOVED: Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 end
 
 %% ---- full-resolution connected components (cell of linear-index lists) ----
