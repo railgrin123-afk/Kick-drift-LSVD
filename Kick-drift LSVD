@@ -219,7 +219,7 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine, maskFine, Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+        [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
         y2bMask_final = false(rows, cols);
@@ -1501,21 +1501,21 @@ stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_pa
 end
 
 % ------------------- S magnitude field vs start (this is the "contour plot") -------------------
-function [Sfine, maskFine, Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
-% Computes a *scalar field* S(x0,y0) on a coarse grid, smooths it, then
-% interpolates to full resolution so you can:
-%   - see magnitude (heatmap + colorbar)
-%   - draw clean contours (e.g. S=2)
+function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+% Computes scalar fields S(x0,y0) and rotation θ(x0,y0) on a coarse grid,
+% smooths them, then interpolates to full resolution.
 %
-% Returns TWO versions:
-%   Sfine, maskFine             — S values at STARTING locations (x0,y0)
-%   Sfine_final, maskFine_final — same S values remapped to FINAL (current) locations
+% Returns:
+%   Sfine, maskFine             — S values at STARTING locations
+%   Sfine_final, maskFine_final — S values remapped to FINAL (current) locations
+%   Rotfine, Rotfine_final      — rotation angle (radians) at start/final locations
 
 step = P.FIELD_STEP;
 ys = 1:step:H;   % 1-based for plotting
 xs = 1:step:W;
 
 Scoarse = nan(numel(ys), numel(xs));
+Rotcoarse = nan(numel(ys), numel(xs));
 maskC   = false(numel(ys), numel(xs));
 
 % Store final positions for each coarse grid point
@@ -1535,6 +1535,7 @@ for iy = 1:numel(ys)
         end
 
         Scoarse(iy,ix) = monodromy_to_Smax(M_sym);
+        Rotcoarse(iy,ix) = monodromy_to_rotation(M_sym);
         maskC(iy,ix)   = true;
 
         % Store final (current) positions (0-based -> 1-based for plotting)
@@ -1543,41 +1544,47 @@ for iy = 1:numel(ys)
     end
 end
 
-% ---- START-location S-field (original) ----
+% ---- START-location S-field and rotation field (original) ----
 % Smooth with NaN-aware Gaussian (prevents ugly pixel blocks)
 Ssm = smooth2_gaussian_nan(Scoarse, maskC, P.FIELD_SMOOTH_SIG);
+Rotsm = smooth2_gaussian_nan(Rotcoarse, maskC, P.FIELD_SMOOTH_SIG);
 
 % Interpolate to full image resolution
 [Xc, Yc] = meshgrid(xs, ys);
 [Xf, Yf] = meshgrid(1:W, 1:H);
 
 Sfine = interp2(Xc, Yc, Ssm, Xf, Yf, 'linear', NaN);
+Rotfine = interp2(Xc, Yc, Rotsm, Xf, Yf, 'linear', NaN);
 maskFine = isfinite(Sfine);
 
 % Clip for display (magnitude still correct, just not blown out visually)
 % REMOVED: Sfine(Sfine < 1) = 1;
 % REMOVED: Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 
-% ---- FINAL-location S-field (scattered interpolation) ----
+% ---- FINAL-location S-field and rotation field (scattered interpolation) ----
 % Each coarse probe started at (xs(ix), ys(iy)) and ended at
-% (finalX, finalY).  We have its S value.  Now we want S on a regular
+% (finalX, finalY).  We have its S and rotation values.  Now we want them on a regular
 % grid indexed by the FINAL (current) coordinates.
 
-validC = maskC & isfinite(Scoarse);
+validC = maskC & isfinite(Scoarse) & isfinite(Rotcoarse);
 Svals  = Scoarse(validC);
+Rotvals = Rotcoarse(validC);
 fxVals = finalX_coarse(validC);   % 1-based x of final position
 fyVals = finalY_coarse(validC);   % 1-based y of final position
 
 if numel(Svals) >= 4
     % Use scatteredInterpolant for smooth coverage of the full grid
-    F_interp = scatteredInterpolant(fxVals(:), fyVals(:), Svals(:), 'natural', 'nearest');
+    F_S_interp = scatteredInterpolant(fxVals(:), fyVals(:), Svals(:), 'natural', 'nearest');
+    F_Rot_interp = scatteredInterpolant(fxVals(:), fyVals(:), Rotvals(:), 'natural', 'nearest');
 
     [Xf, Yf] = meshgrid(1:W, 1:H);
-    Sfine_final = F_interp(Xf, Yf);
+    Sfine_final = F_S_interp(Xf, Yf);
+    Rotfine_final = F_Rot_interp(Xf, Yf);
 
     % Smooth lightly to remove interpolation noise
     maskF_raw = isfinite(Sfine_final);
     Sfine_final = smooth2_gaussian_nan(Sfine_final, maskF_raw, P.FIELD_SMOOTH_SIG);
+    Rotfine_final = smooth2_gaussian_nan(Rotfine_final, maskF_raw, P.FIELD_SMOOTH_SIG);
     maskFine_final = isfinite(Sfine_final);
 
     % Clip for display (REMOVED to preserve full data range)
@@ -1585,6 +1592,7 @@ if numel(Svals) >= 4
     % REMOVED: Sfine_final(Sfine_final > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 else
     Sfine_final = nan(H, W);
+    Rotfine_final = nan(H, W);
     maskFine_final = false(H, W);
 end
 end
@@ -1615,6 +1623,13 @@ end
 function Smax = monodromy_to_Smax(M)
 [~,Sig,~] = svd(M);
 Smax = Sig(1,1);
+end
+
+function theta = monodromy_to_rotation(M)
+% Extract rotation angle (local angular momentum) from 2x2 symplectic matrix.
+% Uses atan2 of off-diagonal vs diagonal trace to get rotation in radians.
+% Positive = counterclockwise rotation; negative = clockwise.
+theta = atan2(M(2,1) - M(1,2), M(1,1) + M(2,2));
 end
 
 
