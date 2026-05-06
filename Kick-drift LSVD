@@ -219,7 +219,7 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+        [Sfine, maskFine, Sfine_final, maskFine_final, ~, Rotfine_final, ~, Trfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
         y2bMask_final = false(rows, cols);
@@ -653,6 +653,118 @@ for it = 1:cycles
                 end
             end
             hold off; drawnow;
+
+            % ---- PER-CYCLE ROTATION + TRACE + CLASSIFICATION FIGURE ----
+            % 4 panels at FINAL (current) locations:
+            %   Panel 1: S-field        (stretching magnitude)
+            %   Panel 2: Rotation θ     (local angular momentum, radians, signed)
+            %   Panel 3: Trace(M)       (|tr|<2 = elliptic/rotating, |tr|>2 = hyperbolic/saddle)
+            %   Panel 4: Classification (combines S and |trace| into 4 regimes)
+            if exist('Rotfine_final','var') && ~isempty(Rotfine_final) && ...
+               exist('Trfine_final','var')  && ~isempty(Trfine_final)
+
+                figRot = figure(9000 + it); clf;
+                set(figRot,'Color','w','Position',[40 40 1700 1100], ...
+                    'Name', sprintf('Cycle %d: Stretching vs Rotation (Local Angular Momentum)', it));
+
+                % --- Panel 1: S-field ---
+                subplot(2,2,1);
+                hS = imagesc(Sfine_final);
+                set(hS,'AlphaData', double(maskFine_final));
+                axis image off;
+                caxis([0.9, SParams.S_CLIP_MAX]);
+                colormap(gca, cmap_blue_yellow);
+                cb1 = colorbar; cb1.Label.String = 'S = max singular value';
+                hold on;
+                contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.5);
+                hold off;
+                title(sprintf('(1) STRETCHING field S(x_N,y_N)  |  white = S=%.1f', SParams.S_THR), ...
+                      'FontWeight','bold');
+
+                % --- Panel 2: Rotation angle (signed) ---
+                subplot(2,2,2);
+                hR = imagesc(Rotfine_final);
+                set(hR,'AlphaData', double(maskFine_final));
+                axis image off;
+                rot_vals_abs = abs(Rotfine_final(maskFine_final));
+                rot_vals_abs = rot_vals_abs(isfinite(rot_vals_abs));
+                if isempty(rot_vals_abs)
+                    rot_lim = pi;
+                else
+                    rot_lim = max(1e-3, prctile(rot_vals_abs, 98));
+                end
+                caxis([-rot_lim, rot_lim]);
+                cmap_rot = build_diverging_bwr(256);
+                colormap(gca, cmap_rot);
+                cb2 = colorbar; cb2.Label.String = '\theta (radians)  [- = CW, + = CCW]';
+                title('(2) ROTATION angle \theta (local angular momentum)', 'FontWeight','bold');
+
+                % --- Panel 3: Trace(M) ---
+                subplot(2,2,3);
+                hT = imagesc(Trfine_final);
+                set(hT,'AlphaData', double(maskFine_final));
+                axis image off;
+                tr_vals_abs = abs(Trfine_final(maskFine_final));
+                tr_vals_abs = tr_vals_abs(isfinite(tr_vals_abs));
+                if isempty(tr_vals_abs)
+                    tr_lim = 4;
+                else
+                    tr_lim = max(2.5, prctile(tr_vals_abs, 98));
+                end
+                caxis([-tr_lim, tr_lim]);
+                colormap(gca, cmap_rot);
+                cb3 = colorbar; cb3.Label.String = 'trace(M) = M_{11}+M_{22}';
+                hold on;
+                % |trace|=2 contour separates elliptic (rotating) from hyperbolic (stretching)
+                contour(Trfine_final, [-2 -2], 'k', 'LineWidth', 1.2, 'LineStyle','--');
+                contour(Trfine_final, [ 2  2], 'k', 'LineWidth', 1.2, 'LineStyle','--');
+                hold off;
+                title('(3) TRACE(M)  |  dashed = |tr|=2 (elliptic\leftrightarrowhyperbolic)', ...
+                      'FontWeight','bold');
+
+                % --- Panel 4: Combined classification ---
+                %   1: low-S + elliptic   = STABLE VORTEX (tornado eye)        cyan
+                %   2: low-S + hyperbolic = quiet stretch (frozen shear)        light blue
+                %   3: high-S + elliptic  = CHAOTIC VORTEX STRETCHING           magenta
+                %   4: high-S + hyperbolic= PURE STRETCH / TURBULENT SHEAR      orange
+                subplot(2,2,4);
+                low_S      = maskFine_final & (Sfine_final <= SParams.S_THR);
+                high_S     = maskFine_final & (Sfine_final >  SParams.S_THR);
+                elliptic   = maskFine_final & (abs(Trfine_final) <  2);
+                hyperbolic = maskFine_final & (abs(Trfine_final) >= 2);
+
+                Lclass = zeros(size(Sfine_final), 'uint8');
+                Lclass(low_S  & elliptic)   = 1;   % stable vortex
+                Lclass(low_S  & hyperbolic) = 2;   % quiet stretch
+                Lclass(high_S & elliptic)   = 3;   % chaotic vortex stretching
+                Lclass(high_S & hyperbolic) = 4;   % pure shear
+
+                class_cmap = [...
+                    0.00 0.85 0.95;   % 1: cyan      = stable vortex (tornado eye)
+                    0.55 0.75 0.95;   % 2: light blue= quiet stretch
+                    1.00 0.20 0.80;   % 3: magenta   = chaotic vortex stretching
+                    1.00 0.55 0.00];  % 4: orange    = pure shear / turbulent shear
+
+                hC = imagesc(double(Lclass));
+                set(hC,'AlphaData', double(Lclass>0));
+                axis image off;
+                colormap(gca, class_cmap);
+                caxis([0.5, 4.5]);
+                cb4 = colorbar;
+                cb4.Ticks      = 1:4;
+                cb4.TickLabels = {...
+                    'STABLE VORTEX  (low-S, elliptic)', ...
+                    'quiet stretch  (low-S, hyperbolic)', ...
+                    'CHAOTIC VORTEX (high-S, elliptic)', ...
+                    'PURE SHEAR     (high-S, hyperbolic)'};
+                title(sprintf('(4) CLASSIFICATION  |  S_{THR}=%.1f, |trace|=2 split', SParams.S_THR), ...
+                      'FontWeight','bold');
+
+                sgtitle(sprintf(['Cycle %d  |  Nwin=%d, t0=%d   ', ...
+                                 '\\bfPanels:\\rm  (1) stretching S   (2) rotation \\theta   (3) trace(M)   (4) regime classification'], ...
+                                 it, Nw, t0_recent), 'FontSize', 12);
+                drawnow;
+            end
         end
     else
         Sfine = []; maskFine = [];
@@ -1501,14 +1613,17 @@ stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_pa
 end
 
 % ------------------- S magnitude field vs start (this is the "contour plot") -------------------
-function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
-% Computes scalar fields S(x0,y0) and rotation θ(x0,y0) on a coarse grid,
-% smooths them, then interpolates to full resolution.
+function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final, Trfine, Trfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+% Computes scalar fields S(x0,y0), rotation θ(x0,y0), and trace(M) on a
+% coarse grid, smooths them, then interpolates to full resolution.
 %
 % Returns:
 %   Sfine, maskFine             — S values at STARTING locations
 %   Sfine_final, maskFine_final — S values remapped to FINAL (current) locations
 %   Rotfine, Rotfine_final      — rotation angle (radians) at start/final locations
+%   Trfine,  Trfine_final       — trace(M) at start/final locations
+%                                 |trace|<2 = elliptic (rotating, stable)
+%                                 |trace|>2 = hyperbolic (saddle, stretching)
 
 step = P.FIELD_STEP;
 ys = 1:step:H;   % 1-based for plotting
@@ -1516,6 +1631,7 @@ xs = 1:step:W;
 
 Scoarse = nan(numel(ys), numel(xs));
 Rotcoarse = nan(numel(ys), numel(xs));
+Trcoarse = nan(numel(ys), numel(xs));
 maskC   = false(numel(ys), numel(xs));
 
 % Store final positions for each coarse grid point
@@ -1536,6 +1652,7 @@ for iy = 1:numel(ys)
 
         Scoarse(iy,ix) = monodromy_to_Smax(M_sym);
         Rotcoarse(iy,ix) = monodromy_to_rotation(M_sym);
+        Trcoarse(iy,ix) = M_sym(1,1) + M_sym(2,2);
         maskC(iy,ix)   = true;
 
         % Store final (current) positions (0-based -> 1-based for plotting)
@@ -1544,10 +1661,11 @@ for iy = 1:numel(ys)
     end
 end
 
-% ---- START-location S-field and rotation field (original) ----
+% ---- START-location S, rotation, and trace fields ----
 % Smooth with NaN-aware Gaussian (prevents ugly pixel blocks)
 Ssm = smooth2_gaussian_nan(Scoarse, maskC, P.FIELD_SMOOTH_SIG);
 Rotsm = smooth2_gaussian_nan(Rotcoarse, maskC, P.FIELD_SMOOTH_SIG);
+Trsm = smooth2_gaussian_nan(Trcoarse, maskC, P.FIELD_SMOOTH_SIG);
 
 % Interpolate to full image resolution
 [Xc, Yc] = meshgrid(xs, ys);
@@ -1555,20 +1673,22 @@ Rotsm = smooth2_gaussian_nan(Rotcoarse, maskC, P.FIELD_SMOOTH_SIG);
 
 Sfine = interp2(Xc, Yc, Ssm, Xf, Yf, 'linear', NaN);
 Rotfine = interp2(Xc, Yc, Rotsm, Xf, Yf, 'linear', NaN);
+Trfine = interp2(Xc, Yc, Trsm, Xf, Yf, 'linear', NaN);
 maskFine = isfinite(Sfine);
 
 % Clip for display (magnitude still correct, just not blown out visually)
 % REMOVED: Sfine(Sfine < 1) = 1;
 % REMOVED: Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 
-% ---- FINAL-location S-field and rotation field (scattered interpolation) ----
+% ---- FINAL-location fields (scattered interpolation) ----
 % Each coarse probe started at (xs(ix), ys(iy)) and ended at
-% (finalX, finalY).  We have its S and rotation values.  Now we want them on a regular
-% grid indexed by the FINAL (current) coordinates.
+% (finalX, finalY).  We have S, rotation, and trace at each probe.
+% Now we want them on a regular grid indexed by FINAL (current) coords.
 
-validC = maskC & isfinite(Scoarse) & isfinite(Rotcoarse);
+validC = maskC & isfinite(Scoarse) & isfinite(Rotcoarse) & isfinite(Trcoarse);
 Svals  = Scoarse(validC);
 Rotvals = Rotcoarse(validC);
+Trvals  = Trcoarse(validC);
 fxVals = finalX_coarse(validC);   % 1-based x of final position
 fyVals = finalY_coarse(validC);   % 1-based y of final position
 
@@ -1576,15 +1696,18 @@ if numel(Svals) >= 4
     % Use scatteredInterpolant for smooth coverage of the full grid
     F_S_interp = scatteredInterpolant(fxVals(:), fyVals(:), Svals(:), 'natural', 'nearest');
     F_Rot_interp = scatteredInterpolant(fxVals(:), fyVals(:), Rotvals(:), 'natural', 'nearest');
+    F_Tr_interp  = scatteredInterpolant(fxVals(:), fyVals(:), Trvals(:),  'natural', 'nearest');
 
     [Xf, Yf] = meshgrid(1:W, 1:H);
     Sfine_final = F_S_interp(Xf, Yf);
     Rotfine_final = F_Rot_interp(Xf, Yf);
+    Trfine_final  = F_Tr_interp(Xf, Yf);
 
     % Smooth lightly to remove interpolation noise
     maskF_raw = isfinite(Sfine_final);
     Sfine_final = smooth2_gaussian_nan(Sfine_final, maskF_raw, P.FIELD_SMOOTH_SIG);
     Rotfine_final = smooth2_gaussian_nan(Rotfine_final, maskF_raw, P.FIELD_SMOOTH_SIG);
+    Trfine_final  = smooth2_gaussian_nan(Trfine_final,  maskF_raw, P.FIELD_SMOOTH_SIG);
     maskFine_final = isfinite(Sfine_final);
 
     % Clip for display (REMOVED to preserve full data range)
@@ -1593,6 +1716,7 @@ if numel(Svals) >= 4
 else
     Sfine_final = nan(H, W);
     Rotfine_final = nan(H, W);
+    Trfine_final  = nan(H, W);
     maskFine_final = false(H, W);
 end
 end
@@ -2118,4 +2242,20 @@ for b = 1:6
              'MarkerSize', 10, 'Color', dot_cmap(b,:));
     end
 end
+end
+
+function cmap = build_diverging_bwr(N)
+% Diverging blue->white->red colormap of length N (for signed scalars
+% like rotation angle or trace).
+if nargin<1, N = 256; end
+half = floor(N/2);
+% blue -> white
+b1 = linspace(0.10, 1.00, half).';
+g1 = linspace(0.30, 1.00, half).';
+r1 = linspace(0.20, 1.00, half).';
+% white -> red
+r2 = linspace(1.00, 0.85, N-half).';
+g2 = linspace(1.00, 0.10, N-half).';
+b2 = linspace(1.00, 0.15, N-half).';
+cmap = [r1 g1 b1; r2 g2 b2];
 end
