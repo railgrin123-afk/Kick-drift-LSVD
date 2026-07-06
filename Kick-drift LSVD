@@ -904,42 +904,6 @@ title('Total area in pixels (full-res Sfine)');
 legend('blue area','yellow area','Location','best');
 
 
-% Figure: blob counts + blob size trends
-figure(6200); clf; set(gcf,'Color','w','Position',[100 540 900 650], 'Name','S-field blob stats vs cycle');
-tiledlayout(2,2,'TileSpacing','compact','Padding','compact');
-
-nexttile;
-plot(1:cycles, n_blue_blobs,  'o-','LineWidth',1.4); hold on;
-plot(1:cycles, n_yellow_blobs,'o-','LineWidth',1.4);
-grid on;
-xlabel('cycle'); ylabel('# seperate islands for colour regions (blobs)');
-title(sprintf('Blob count (connectivity=%d, blob_step=%d)', SParams.BLOB_CONN, SParams.BLOB_STEP));
-legend('blue blobs','yellow blobs','Location','best');
-
-nexttile;
-plot(1:cycles, mean_blue_blob_area_px,  'o-','LineWidth',1.4); hold on;
-plot(1:cycles, mean_yellow_blob_area_px,'o-','LineWidth',1.4);
-grid on;
-xlabel('cycle'); ylabel('mean blob area (pixels)');
-title('Mean blob area (scaled back to full-res pixels)');
-legend('blue mean area','yellow mean area','Location','best');
-
-nexttile;
-plot(1:cycles, med_blue_blob_area_px,  'o-','LineWidth',1.4); hold on;
-plot(1:cycles, med_yellow_blob_area_px,'o-','LineWidth',1.4);
-grid on;
-xlabel('cycle'); ylabel('median blob area (pixels)');
-title('Median blob area (more robust than mean)');
-legend('blue median','yellow median','Location','best');
-
-nexttile;
-plot(1:cycles, max_blue_blob_area_px,  'o-','LineWidth',1.4); hold on;
-plot(1:cycles, max_yellow_blob_area_px,'o-','LineWidth',1.4);
-grid on;
-xlabel('cycle'); ylabel('max blob area (pixels)');
-title('Largest blob area each cycle');
-legend('blue max','yellow max','Location','best');
-
 % ===================== NEW FIGURE: yellow->blue area vs cycle =====================
 figure(6300); clf;
 set(gcf,'Color','w','Position',[120 80 900 420], 'Name','Yellow->Blue (S>2 -> S<=2) area vs cycle');
