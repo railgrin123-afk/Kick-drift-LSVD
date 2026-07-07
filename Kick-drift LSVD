@@ -99,10 +99,11 @@ SParams.S_THR   = 2.0;         % your criterion: S <= 2 is low-stretch
 SParams.DEPOSIT_AT_FINAL = true;
 
 % -------- S-field (magnitude map) settings (this makes the contour plot clean) -----
-% EXPERIMENT: FIELD_STEP lowered 8 -> 4 to compute S on a finer grid so the
-%             interpolation gaps (low-stretch spilling into S>5) shrink.
-%             To revert: set back to 8.
-SParams.FIELD_STEP        = 4;     % coarsening for S-field evaluation (bigger = faster)  [EXPERIMENT: was 8]
+% EXPERIMENT: FIELD_STEP lowered 8 -> 4 -> 2 to compute S on a finer grid.
+%             At step=2 we probe every 2nd pixel (~4x the points of step=4),
+%             to check whether the sharp low/high-S mixing persists at finer
+%             resolution or resolves into structure. SLOW. To revert: 8.
+SParams.FIELD_STEP        = 2;     % coarsening for S-field evaluation (bigger = faster)  [EXPERIMENT: was 8, then 4]
 SParams.FIELD_SMOOTH_SIG  = 1.0;   % smoothing strength in "grid cells"
 SParams.FIELD_ALPHA       = 0.28;  % transparency when overlaying on the image
 SParams.S_CLIP_MAX        = 15;    % color scale upper cap for display (logarithmic, so high S compressed)
@@ -115,7 +116,7 @@ SParams.SHOW_ONLY_THR_CONTOUR = true;
 %   values at each grid point as colored dots (no interpolation, no smoothing).
 %   Adds one extra figure per cycle (5600+it).  To revert: set to false.
 SParams.EXPERIMENT_SCATTER_S = true;
-SParams.SCATTER_DOT_SIZE     = 22;    % marker area for the raw-S scatter points
+SParams.SCATTER_DOT_SIZE     = 6;     % marker area for the raw-S scatter points (small: step=2 gives ~4x more dots)
 
 % Custom colormap: dark cyan -> teal -> yellow
 nCmap = 256;
@@ -488,9 +489,10 @@ for it = 1:cycles
 
             sc_lo = Sscatter.S <= SParams.S_THR;   % low-stretch points
 
+            % no marker edges: at step=2 density the dark edges would drown
+            % out the fill colors
             scatter(Sscatter.x(:), Sscatter.y(:), SParams.SCATTER_DOT_SIZE, ...
-                    Sscatter.S(:), 'filled', ...
-                    'MarkerEdgeColor', [0.15 0.15 0.15], 'LineWidth', 0.25);
+                    Sscatter.S(:), 'filled');
             axis image; axis ij; axis off;      % ij => image orientation (y down)
             xlim([1 cols]); ylim([1 rows]);
             colormap(figSC, cmap_blue_yellow);
