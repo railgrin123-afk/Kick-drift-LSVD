@@ -99,13 +99,23 @@ SParams.S_THR   = 2.0;         % your criterion: S <= 2 is low-stretch
 SParams.DEPOSIT_AT_FINAL = true;
 
 % -------- S-field (magnitude map) settings (this makes the contour plot clean) -----
-SParams.FIELD_STEP        = 8;     % coarsening for S-field evaluation (bigger = faster)
+% EXPERIMENT: FIELD_STEP lowered 8 -> 4 to compute S on a finer grid so the
+%             interpolation gaps (low-stretch spilling into S>5) shrink.
+%             To revert: set back to 8.
+SParams.FIELD_STEP        = 4;     % coarsening for S-field evaluation (bigger = faster)  [EXPERIMENT: was 8]
 SParams.FIELD_SMOOTH_SIG  = 1.0;   % smoothing strength in "grid cells"
 SParams.FIELD_ALPHA       = 0.28;  % transparency when overlaying on the image
 SParams.S_CLIP_MAX        = 15;    % color scale upper cap for display (logarithmic, so high S compressed)
 
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
 SParams.SHOW_ONLY_THR_CONTOUR = true;
+
+% EXPERIMENT: raw-scatter view of the S-field.
+%   Instead of trusting the interpolated heatmap, plot the ACTUAL computed S
+%   values at each grid point as colored dots (no interpolation, no smoothing).
+%   Adds one extra figure per cycle (5600+it).  To revert: set to false.
+SParams.EXPERIMENT_SCATTER_S = true;
+SParams.SCATTER_DOT_SIZE     = 22;    % marker area for the raw-S scatter points
 
 % Custom colormap: dark cyan -> teal -> yellow
 nCmap = 256;
@@ -219,7 +229,7 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine, maskFine, Sfine_final, maskFine_final, ~, Rotfine_final, ~, Trfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+        [Sfine, maskFine, Sfine_final, maskFine_final, ~, Rotfine_final, ~, Trfine_final, Sscatter] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
         y2bMask_final = false(rows, cols);
@@ -464,6 +474,32 @@ for it = 1:cycles
             end
 
             hold off;
+            drawnow;
+        end
+
+        % ---- EXPERIMENT: RAW-S SCATTER at CURRENT locations ----
+        % Plots the ACTUAL computed S values at each finer grid point (no
+        % interpolation, no smoothing) so low-stretch (S<=2) points cannot
+        % visually "spill" into high-S regions. To revert: EXPERIMENT_SCATTER_S=false.
+        if SParams.EXPERIMENT_SCATTER_S && exist('Sscatter','var') && ~isempty(Sscatter.S)
+            figSC = figure(5600 + it); clf;
+            set(figSC,'Color','w','Position',[1050 80 900 900], ...
+                'Name', sprintf('Cycle %d: RAW-S scatter at CURRENT locations', it));
+
+            sc_lo = Sscatter.S <= SParams.S_THR;   % low-stretch points
+
+            scatter(Sscatter.x(:), Sscatter.y(:), SParams.SCATTER_DOT_SIZE, ...
+                    Sscatter.S(:), 'filled', ...
+                    'MarkerEdgeColor', [0.15 0.15 0.15], 'LineWidth', 0.25);
+            axis image; axis ij; axis off;      % ij => image orientation (y down)
+            xlim([1 cols]); ylim([1 rows]);
+            colormap(figSC, cmap_blue_yellow);
+            colorbar;
+            apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
+            title(sprintf(['cycle %d: RAW computed S at grid points (no interp) | ' ...
+                           'Nwin=%d, t0=%d | step=%d | low(S<=%.1f)=%d / %d'], ...
+                  it, Nw, t0_recent, SParams.FIELD_STEP, SParams.S_THR, ...
+                  nnz(sc_lo), numel(Sscatter.S)));
             drawnow;
         end
 
@@ -1580,7 +1616,11 @@ stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_pa
 end
 
 % ------------------- S magnitude field vs start (this is the "contour plot") -------------------
-function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final, Trfine, Trfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final, Trfine, Trfine_final, Sscatter] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+% Sscatter (EXPERIMENT): struct with the RAW computed S values at their FINAL
+%   grid positions — no interpolation, no smoothing. Fields:
+%     .x, .y  — 1-based final pixel coords of each coarse probe
+%     .S      — max-singular-value S at that probe
 % Computes scalar fields S(x0,y0), rotation θ(x0,y0), and trace(M) on a
 % coarse grid, smooths them, then interpolates to full resolution.
 %
@@ -1658,6 +1698,10 @@ Rotvals = Rotcoarse(validC);
 Trvals  = Trcoarse(validC);
 fxVals = finalX_coarse(validC);   % 1-based x of final position
 fyVals = finalY_coarse(validC);   % 1-based y of final position
+
+% EXPERIMENT: package the raw (unsmoothed, un-interpolated) computed S values
+% at their final grid positions for the scatter view.
+Sscatter = struct('x', fxVals(:), 'y', fyVals(:), 'S', Svals(:));
 
 if numel(Svals) >= 4
     % Use scatteredInterpolant for smooth coverage of the full grid
