@@ -638,6 +638,147 @@ for it = 1:cycles
                     it, numel(Svals), cax_lo, cax_hi), 'FontWeight','bold');
             drawnow;
 
+            % ---- EXPERIMENT: RAW SCATTER S histogram (no interp) ----
+            % Compare: are the RAW computed S values actually separating into
+            % distinct low/high clusters, or continuously distributed?
+            if SParams.EXPERIMENT_SCATTER_S && exist('Sscatter','var') && ~isempty(Sscatter.S)
+                Sraw = Sscatter.S(:);
+
+                figSH = figure(7100 + it); clf;
+                set(figSH,'Color','w','Position',[80 540 2350 420], ...
+                    'Name', sprintf('Cycle %d: RAW-scatter S-distribution histograms (NO interp)', it));
+                tiledlayout(1,5,'TileSpacing','compact','Padding','compact');
+
+                cax_lo = 1.0;  cax_hi = SParams.S_CLIP_MAX;
+
+                % --- Panel 1: 0 <= S <= 2.0 (low-stretch zone) ---
+                nexttile;
+                seg1_raw = Sraw(Sraw >= 0 & Sraw <= 2.0);
+                edges1 = 0:0.05:2.0;
+                histogram(seg1_raw, edges1, 'FaceColor', [0.20 0.45 0.85], 'EdgeColor','none');
+                hold on;
+                if ~isempty(seg1_raw)
+                    xline(mean(seg1_raw), '--', 'Color',[0.0 0.2 0.6], 'LineWidth',1.5, ...
+                          'Label', sprintf('mean=%.3f', mean(seg1_raw)), ...
+                          'LabelHorizontalAlignment','left');
+                end
+                xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
+                      'Label','S=2.0 threshold','LabelHorizontalAlignment','left');
+                xlim([0 2.0]); grid on;
+                xlabel('S level'); ylabel('point count');
+                title(sprintf('Low-stretch (0 <= S <= 2.0)  n=%d', numel(seg1_raw)));
+
+                % --- Panel 2: 2.0 < S <= 6.0 (high-stretch zone) ---
+                nexttile;
+                seg2_raw = Sraw(Sraw > 2.0 & Sraw <= 6.0);
+                edges2 = 2.0:0.1:6.0;
+                histogram(seg2_raw, edges2, 'FaceColor', [0.95 0.55 0.10], 'EdgeColor','none');
+                hold on;
+                if ~isempty(seg2_raw)
+                    xline(mean(seg2_raw), '--', 'Color',[0.6 0.25 0.0], 'LineWidth',1.5, ...
+                          'Label', sprintf('mean=%.3f', mean(seg2_raw)), ...
+                          'LabelHorizontalAlignment','left');
+                end
+                xlim([2.0 6.0]); grid on;
+                xlabel('S level'); ylabel('point count');
+                title(sprintf('High-stretch (2.0 < S <= 6.0)  n=%d', numel(seg2_raw)));
+
+                % --- Panel 3: S > 6.0 (extreme stretch) ---
+                nexttile;
+                seg3_raw = Sraw(Sraw > 6.0);
+                if ~isempty(seg3_raw)
+                    upper3 = min(max(seg3_raw), 100);
+                    edges3 = 6.0:max(0.25,(upper3-6)/40):upper3;
+                else
+                    upper3 = 30;
+                    edges3 = 6:1:upper3;
+                end
+                histogram(seg3_raw, edges3, 'FaceColor', [0.85 0.10 0.10], 'EdgeColor','none');
+                hold on;
+                if ~isempty(seg3_raw)
+                    xline(mean(seg3_raw), '--', 'Color',[0.5 0 0], 'LineWidth',1.5, ...
+                          'Label', sprintf('mean=%.3f', mean(seg3_raw)), ...
+                          'LabelHorizontalAlignment','left');
+                end
+                xlim([6.0 upper3]); grid on;
+                xlabel('S level'); ylabel('point count');
+                title(sprintf('Extreme (S > 6.0)  n=%d', numel(seg3_raw)));
+
+                % --- Panel 4: S<=2 by rendered color (same log-scale coloring) ---
+                nexttile;
+                seg4_raw = Sraw(Sraw >= 0 & Sraw <= 2.0);
+                edges4 = 0:0.05:2.0;
+                if ~isempty(seg4_raw)
+                    seg4_safe = max(seg4_raw, cax_lo);
+                    tvals = (log(seg4_safe) - log(cax_lo)) / max(eps, (log(cax_hi) - log(cax_lo)));
+                    tvals = min(1, max(0, tvals));
+                    R4 = 0.0 *(1-tvals).^2 + 0.129*2.*tvals.*(1-tvals) + 0.993*tvals.^2;
+                    B4 = 0.35*(1-tvals).^2 + 0.692*2.*tvals.*(1-tvals) + 0.144*tvals.^2;
+                    yellow_mask = (R4 > B4);
+                    seg4_yellow = seg4_raw(yellow_mask);
+                    seg4_teal   = seg4_raw(~yellow_mask);
+                else
+                    seg4_yellow = [];
+                    seg4_teal = [];
+                end
+
+                counts_teal   = histcounts(seg4_teal,   edges4);
+                counts_yellow = histcounts(seg4_yellow, edges4);
+                centers4 = 0.5*(edges4(1:end-1)+edges4(2:end));
+                hb = bar(centers4, [counts_teal; counts_yellow]', ...
+                         'stacked', 'BarWidth', 1.0, 'EdgeColor','none');
+                hb(1).FaceColor = [0.20 0.45 0.85];
+                hb(2).FaceColor = [0.95 0.55 0.10];
+                hold on;
+                xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
+                      'Label','S=2.0','LabelHorizontalAlignment','left');
+                xlim([0 2.0]); grid on;
+                xlabel('S level'); ylabel('point count');
+                title(sprintf('S<=2 by rendered color  teal=%d  yellow-spill=%d', ...
+                              numel(seg4_teal), numel(seg4_yellow)));
+                legend({'teal-side (R<=B)','yellow-spill (R>B)'}, ...
+                       'Location','northeast','FontSize',8);
+
+                % --- Panel 5: 2.0<S<=cax_hi by rendered color ---
+                nexttile;
+                seg5_raw = Sraw(Sraw > 2.0 & Sraw <= cax_hi);
+                edges5 = 2.0:max(0.1, (cax_hi-2.0)/35):cax_hi;
+                if ~isempty(seg5_raw)
+                    seg5_safe = max(seg5_raw, cax_lo);
+                    tvals5 = (log(seg5_safe) - log(cax_lo)) / max(eps, (log(cax_hi) - log(cax_lo)));
+                    tvals5 = min(1, max(0, tvals5));
+                    R5 = 0.0 *(1-tvals5).^2 + 0.129*2.*tvals5.*(1-tvals5) + 0.993*tvals5.^2;
+                    B5 = 0.35*(1-tvals5).^2 + 0.692*2.*tvals5.*(1-tvals5) + 0.144*tvals5.^2;
+                    teal_mask5 = (R5 <= B5);
+                    seg5_teal   = seg5_raw(teal_mask5);
+                    seg5_yellow = seg5_raw(~teal_mask5);
+                else
+                    seg5_teal = [];
+                    seg5_yellow = [];
+                end
+
+                counts_teal5   = histcounts(seg5_teal,   edges5);
+                counts_yellow5 = histcounts(seg5_yellow, edges5);
+                centers5 = 0.5*(edges5(1:end-1)+edges5(2:end));
+                hb5 = bar(centers5, [counts_teal5; counts_yellow5]', ...
+                          'stacked', 'BarWidth', 1.0, 'EdgeColor','none');
+                hb5(1).FaceColor = [0.20 0.45 0.85];
+                hb5(2).FaceColor = [0.95 0.55 0.10];
+                hold on;
+                xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
+                      'Label','S=2.0','LabelHorizontalAlignment','right');
+                xlim([2.0 cax_hi]); grid on;
+                xlabel('S level'); ylabel('point count');
+                title(sprintf('2.0<S<=%.1f by rendered color  yellow=%d  blue-spill=%d', ...
+                              cax_hi, numel(seg5_yellow), numel(seg5_teal)));
+                legend({'blue-spill (R<=B)','yellow-side (R>B)'}, ...
+                       'Location','northeast','FontSize',8);
+
+                sgtitle(sprintf('Cycle %d: RAW computed S at grid points (n=%d)  NO interpolation/smoothing', ...
+                        it, numel(Sraw)), 'FontWeight','bold');
+                drawnow;
+            end
+
             % ---- PER-CYCLE BLOB MAP (mirrors final blob figure 7001) ----
             figBlob = figure(8000 + it); clf;
             set(figBlob,'Color','w','Position',[100 60 1100 950], ...
