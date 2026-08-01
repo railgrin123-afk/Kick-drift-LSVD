@@ -99,46 +99,13 @@ SParams.S_THR   = 2.0;         % your criterion: S <= 2 is low-stretch
 SParams.DEPOSIT_AT_FINAL = true;
 
 % -------- S-field (magnitude map) settings (this makes the contour plot clean) -----
-% EXPERIMENT: FIELD_STEP=4 (was 8). NOTE: step=2 over the FULL field was
-%             tried and reverted — ~750k monodromy probes/cycle risks MATLAB
-%             appearing frozen for very long stretches. The grid-resolution
-%             question is now tested safely by the ROI_ZOOM experiment below
-%             (1-px probing inside a small box). To revert everything: 8.
-SParams.FIELD_STEP        = 4;     % coarsening for S-field evaluation (bigger = faster)  [EXPERIMENT: was 8]
-SParams.MAX_PROBES        = 300000; % safety cap: auto-coarsens step if the probe grid would exceed this
+SParams.FIELD_STEP        = 8;     % coarsening for S-field evaluation (bigger = faster)
 SParams.FIELD_SMOOTH_SIG  = 1.0;   % smoothing strength in "grid cells"
 SParams.FIELD_ALPHA       = 0.28;  % transparency when overlaying on the image
 SParams.S_CLIP_MAX        = 15;    % color scale upper cap for display (logarithmic, so high S compressed)
 
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
 SParams.SHOW_ONLY_THR_CONTOUR = true;
-
-% EXPERIMENT: raw-scatter view of the S-field.
-%   Instead of trusting the interpolated heatmap, plot the ACTUAL computed S
-%   values at each grid point as colored dots (no interpolation, no smoothing).
-%   Adds one extra figure per cycle (5600+it).  To revert: set to false.
-SParams.EXPERIMENT_SCATTER_S = true;
-SParams.SCATTER_DOT_SIZE     = 10;    % marker area for the raw-S scatter points
-
-% EXPERIMENT: hypothesis tests for the low/high-S "mixing" seen in raw data.
-%   (1) ROI_ZOOM  — grid resolution: probe a small box at 1-px spacing around
-%       the lowest-S probe (START coords). If blue/yellow mixing persists at
-%       1 px, it is real structure, not grid aliasing. Cost bounded by box.
-%   (2) METRIC_COMPARE — is S=sigma_max too harsh? Side-by-side raw dots
-%       classified by S<=2 vs by |trace(M)|<2 (elliptic = KAM-island-like).
-%       If elliptic dots form coherent islands while S<=2 dots are shredded,
-%       the metric is partly responsible.
-%   (3) NWIN_SWEEP — parameter dependence: after the last cycle, recompute
-%       raw S on a cheap coarse grid for Nwin/2, Nwin, 2*Nwin and compare
-%       low-stretch cohesion. (Kick strength K cannot be swept in-run: the
-%       kicks ARE the history. Change K at the top and re-run for that.)
-% To revert: set the flags false.
-SParams.EXPERIMENT_ROI_ZOOM       = true;
-SParams.ROI_HALF                  = 80;   % ROI half-width in px (box = 2*ROI_HALF+1 squared)
-SParams.ROI_STEP                  = 1;    % probe spacing inside ROI (1 = every pixel)
-SParams.EXPERIMENT_METRIC_COMPARE = true;
-SParams.EXPERIMENT_NWIN_SWEEP     = true;
-SParams.NWIN_SWEEP_STEP           = 8;    % coarse grid for the sweep (cheap)
 
 % Custom colormap: dark cyan -> teal -> yellow
 nCmap = 256;
@@ -252,21 +219,8 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine, maskFine, Sfine_final, maskFine_final, ~, Rotfine_final, ~, Trfine_final, Sscatter] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+        [Sfine, maskFine, Sfine_final, maskFine_final, ~, Rotfine_final, ~, Trfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
-
-        % ---- determinant-rejection log (the DET_TOL check is now live) ----
-        if isfield(Sscatter, 'diag')
-            d = Sscatter.diag;
-            fprintf(['cycle %2d | probes=%6d  rejected=%6d (%5.2f%%)  ' ...
-                     '[bad-det=%d, |det-1|>tol=%d]  med|det-1|=%.3e (max=%.3e)\n'], ...
-                    it, d.n_probes, d.n_rejected, 100*d.reject_frac, ...
-                    d.n_bad_det, d.n_tol_fail, d.med_absdev, d.max_absdev);
-            fprintf(['         | by stretch: reject low-S=%5.2f%% vs high-S=%5.2f%%  |  ' ...
-                     'med|det-1| low-S=%.3e vs high-S=%.3e  |  medS kept=%.3f rejected=%.3f\n'], ...
-                    100*d.rejfrac_lowS, 100*d.rejfrac_highS, ...
-                    d.med_absdev_lowS, d.med_absdev_highS, d.S_kept_med, d.S_rej_med);
-        end
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
         y2bMask_final = false(rows, cols);
 
@@ -513,111 +467,6 @@ for it = 1:cycles
             drawnow;
         end
 
-        % ---- EXPERIMENT: RAW-S SCATTER at CURRENT locations ----
-        % Plots the ACTUAL computed S values at each finer grid point (no
-        % interpolation, no smoothing) so low-stretch (S<=2) points cannot
-        % visually "spill" into high-S regions. To revert: EXPERIMENT_SCATTER_S=false.
-        if SParams.EXPERIMENT_SCATTER_S && exist('Sscatter','var') && ~isempty(Sscatter.S)
-            figSC = figure(5600 + it); clf;
-            set(figSC,'Color','w','Position',[1050 80 900 900], ...
-                'Name', sprintf('Cycle %d: RAW-S scatter at CURRENT locations', it));
-
-            sc_lo = Sscatter.S <= SParams.S_THR;   % low-stretch points
-
-            % Low-S drawn LAST so high-S dots can never bury them (see
-            % scatter_S_ontop). No marker edges: at this density the dark
-            % edges would drown out the fill colors.
-            scatter_S_ontop(Sscatter.x(:), Sscatter.y(:), Sscatter.S(:), ...
-                            SParams.SCATTER_DOT_SIZE);
-            axis image; axis ij; axis off;      % ij => image orientation (y down)
-            xlim([1 cols]); ylim([1 rows]);
-            colormap(figSC, cmap_blue_yellow);
-            colorbar;
-            apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
-            title(sprintf(['cycle %d: RAW computed S at grid points (no interp) | ' ...
-                           'Nwin=%d, t0=%d | step=%d | low(S<=%.1f)=%d / %d'], ...
-                  it, Nw, t0_recent, SParams.FIELD_STEP, SParams.S_THR, ...
-                  nnz(sc_lo), numel(Sscatter.S)));
-            drawnow;
-        end
-
-        % ---- EXPERIMENT: ROI ZOOM at 1-px probe spacing (grid-resolution test) ----
-        % Probes a small box (in START coords) centered on this cycle's
-        % lowest-S probe, at ROI_STEP spacing. Shown in START coordinates so
-        % the probe lattice is regular. If blue dots still sit directly next
-        % to yellow dots at 1-px spacing, the mixing is REAL structure of the
-        % dynamics, not grid aliasing. Cost is bounded by the box size.
-        if SParams.EXPERIMENT_ROI_ZOOM && exist('Sscatter','var') && ~isempty(Sscatter.S)
-            [~, imin] = min(Sscatter.S);
-            cx = round(Sscatter.x0(imin));
-            cy = round(Sscatter.y0(imin));
-            hw = SParams.ROI_HALF;
-            xs_roi = max(1, cx-hw) : SParams.ROI_STEP : min(cols, cx+hw);
-            ys_roi = max(1, cy-hw) : SParams.ROI_STEP : min(rows, cy+hw);
-
-            roi = raw_S_probe(dp_x_hist, row0, Tau, rows, cols, t0_recent, Nw, ...
-                              SParams, xs_roi, ys_roi);
-
-            if ~isempty(roi.S)
-                figROI = figure(5700 + it); clf;
-                set(figROI,'Color','w','Position',[120 120 820 760], ...
-                    'Name', sprintf('Cycle %d: ROI zoom, raw S at %d-px spacing', it, SParams.ROI_STEP));
-                scatter_S_ontop(roi.x0, roi.y0, roi.S, 14);   % low-S on top
-                axis image; axis ij;
-                xlim([xs_roi(1) xs_roi(end)]); ylim([ys_roi(1) ys_roi(end)]);
-                colormap(figROI, cmap_blue_yellow);
-                colorbar;
-                apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
-                roi_lo = roi.S <= SParams.S_THR;
-                title(sprintf(['cycle %d: ROI [%d..%d]x[%d..%d] START coords, step=%d px | ' ...
-                               'low(S<=%.1f)=%d / %d (%.1f%%) | det-rejected=%d/%d (%.1f%%)'], ...
-                      it, xs_roi(1), xs_roi(end), ys_roi(1), ys_roi(end), SParams.ROI_STEP, ...
-                      SParams.S_THR, nnz(roi_lo), numel(roi.S), 100*nnz(roi_lo)/numel(roi.S), ...
-                      roi.n_rejected, roi.n_probes, 100*roi.n_rejected/max(1,roi.n_probes)));
-                drawnow;
-            end
-        end
-
-        % ---- EXPERIMENT: METRIC COMPARISON (is S = sigma_max too harsh?) ----
-        % Left : raw dots classified by the stretch metric (S<=2 vs S>2)
-        % Right: raw dots classified by trace(M): |tr|<2 = elliptic
-        %        (rotation-dominated, KAM-island-like) vs |tr|>=2 = hyperbolic.
-        % If elliptic dots form coherent islands while S<=2 dots look
-        % salt-and-pepper, the "spilling" is partly the METRIC, not the flow.
-        if SParams.EXPERIMENT_METRIC_COMPARE && exist('Sscatter','var') && ~isempty(Sscatter.S)
-            figMC = figure(5800 + it); clf;
-            set(figMC,'Color','w','Position',[80 80 1720 840], ...
-                'Name', sprintf('Cycle %d: metric comparison (S vs trace)', it));
-            tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
-
-            lowS = Sscatter.S <= SParams.S_THR;
-            nexttile; hold on;
-            scatter(Sscatter.x(~lowS), Sscatter.y(~lowS), SParams.SCATTER_DOT_SIZE, ...
-                    [0.93 0.82 0.35], 'filled');
-            scatter(Sscatter.x(lowS),  Sscatter.y(lowS),  SParams.SCATTER_DOT_SIZE, ...
-                    [0.00 0.30 0.45], 'filled');
-            hold off; axis image; axis ij; axis off;
-            xlim([1 cols]); ylim([1 rows]);
-            title(sprintf('STRETCH metric: dark = S<=%.1f   n=%d / %d (%.1f%%)', ...
-                  SParams.S_THR, nnz(lowS), numel(lowS), 100*nnz(lowS)/numel(lowS)));
-
-            ell = abs(Sscatter.Tr) < 2;
-            nexttile; hold on;
-            scatter(Sscatter.x(~ell), Sscatter.y(~ell), SParams.SCATTER_DOT_SIZE, ...
-                    [0.93 0.82 0.35], 'filled');
-            scatter(Sscatter.x(ell),  Sscatter.y(ell),  SParams.SCATTER_DOT_SIZE, ...
-                    [0.50 0.10 0.55], 'filled');
-            hold off; axis image; axis ij; axis off;
-            xlim([1 cols]); ylim([1 rows]);
-            title(sprintf('TRACE metric: purple = |tr(M)|<2 elliptic   n=%d / %d (%.1f%%)', ...
-                  nnz(ell), numel(ell), 100*nnz(ell)/numel(ell)));
-
-            sgtitle(sprintf(['Cycle %d: same raw probes, two stability criteria  ' ...
-                             '(if purple clusters but dark is shredded, the metric is the culprit)'], it), ...
-                    'FontWeight','bold');
-            drawnow;
-        end
-
         % ---- 3-PANEL HISTOGRAM of S distribution per cycle ----
         if ~isempty(Sfine_final)
             Svals = Sfine_final(maskFine_final & isfinite(Sfine_final));
@@ -752,147 +601,6 @@ for it = 1:cycles
             sgtitle(sprintf('Cycle %d: S-level distributions  (total valid=%d)  log-caxis=[%.2f, %.2f]', ...
                     it, numel(Svals), cax_lo, cax_hi), 'FontWeight','bold');
             drawnow;
-
-            % ---- EXPERIMENT: RAW SCATTER S histogram (no interp) ----
-            % Compare: are the RAW computed S values actually separating into
-            % distinct low/high clusters, or continuously distributed?
-            if SParams.EXPERIMENT_SCATTER_S && exist('Sscatter','var') && ~isempty(Sscatter.S)
-                Sraw = Sscatter.S(:);
-
-                figSH = figure(7100 + it); clf;
-                set(figSH,'Color','w','Position',[80 540 2350 420], ...
-                    'Name', sprintf('Cycle %d: RAW-scatter S-distribution histograms (NO interp)', it));
-                tiledlayout(1,5,'TileSpacing','compact','Padding','compact');
-
-                cax_lo = 1.0;  cax_hi = SParams.S_CLIP_MAX;
-
-                % --- Panel 1: 0 <= S <= 2.0 (low-stretch zone) ---
-                nexttile;
-                seg1_raw = Sraw(Sraw >= 0 & Sraw <= 2.0);
-                edges1 = 0:0.05:2.0;
-                histogram(seg1_raw, edges1, 'FaceColor', [0.20 0.45 0.85], 'EdgeColor','none');
-                hold on;
-                if ~isempty(seg1_raw)
-                    xline(mean(seg1_raw), '--', 'Color',[0.0 0.2 0.6], 'LineWidth',1.5, ...
-                          'Label', sprintf('mean=%.3f', mean(seg1_raw)), ...
-                          'LabelHorizontalAlignment','left');
-                end
-                xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
-                      'Label','S=2.0 threshold','LabelHorizontalAlignment','left');
-                xlim([0 2.0]); grid on;
-                xlabel('S level'); ylabel('point count');
-                title(sprintf('Low-stretch (0 <= S <= 2.0)  n=%d', numel(seg1_raw)));
-
-                % --- Panel 2: 2.0 < S <= 6.0 (high-stretch zone) ---
-                nexttile;
-                seg2_raw = Sraw(Sraw > 2.0 & Sraw <= 6.0);
-                edges2 = 2.0:0.1:6.0;
-                histogram(seg2_raw, edges2, 'FaceColor', [0.95 0.55 0.10], 'EdgeColor','none');
-                hold on;
-                if ~isempty(seg2_raw)
-                    xline(mean(seg2_raw), '--', 'Color',[0.6 0.25 0.0], 'LineWidth',1.5, ...
-                          'Label', sprintf('mean=%.3f', mean(seg2_raw)), ...
-                          'LabelHorizontalAlignment','left');
-                end
-                xlim([2.0 6.0]); grid on;
-                xlabel('S level'); ylabel('point count');
-                title(sprintf('High-stretch (2.0 < S <= 6.0)  n=%d', numel(seg2_raw)));
-
-                % --- Panel 3: S > 6.0 (extreme stretch) ---
-                nexttile;
-                seg3_raw = Sraw(Sraw > 6.0);
-                if ~isempty(seg3_raw)
-                    upper3 = min(max(seg3_raw), 100);
-                    edges3 = 6.0:max(0.25,(upper3-6)/40):upper3;
-                else
-                    upper3 = 30;
-                    edges3 = 6:1:upper3;
-                end
-                histogram(seg3_raw, edges3, 'FaceColor', [0.85 0.10 0.10], 'EdgeColor','none');
-                hold on;
-                if ~isempty(seg3_raw)
-                    xline(mean(seg3_raw), '--', 'Color',[0.5 0 0], 'LineWidth',1.5, ...
-                          'Label', sprintf('mean=%.3f', mean(seg3_raw)), ...
-                          'LabelHorizontalAlignment','left');
-                end
-                xlim([6.0 upper3]); grid on;
-                xlabel('S level'); ylabel('point count');
-                title(sprintf('Extreme (S > 6.0)  n=%d', numel(seg3_raw)));
-
-                % --- Panel 4: S<=2 by rendered color (same log-scale coloring) ---
-                nexttile;
-                seg4_raw = Sraw(Sraw >= 0 & Sraw <= 2.0);
-                edges4 = 0:0.05:2.0;
-                if ~isempty(seg4_raw)
-                    seg4_safe = max(seg4_raw, cax_lo);
-                    tvals = (log(seg4_safe) - log(cax_lo)) / max(eps, (log(cax_hi) - log(cax_lo)));
-                    tvals = min(1, max(0, tvals));
-                    R4 = 0.0 *(1-tvals).^2 + 0.129*2.*tvals.*(1-tvals) + 0.993*tvals.^2;
-                    B4 = 0.35*(1-tvals).^2 + 0.692*2.*tvals.*(1-tvals) + 0.144*tvals.^2;
-                    yellow_mask = (R4 > B4);
-                    seg4_yellow = seg4_raw(yellow_mask);
-                    seg4_teal   = seg4_raw(~yellow_mask);
-                else
-                    seg4_yellow = [];
-                    seg4_teal = [];
-                end
-
-                counts_teal   = histcounts(seg4_teal,   edges4);
-                counts_yellow = histcounts(seg4_yellow, edges4);
-                centers4 = 0.5*(edges4(1:end-1)+edges4(2:end));
-                hb = bar(centers4, [counts_teal; counts_yellow]', ...
-                         'stacked', 'BarWidth', 1.0, 'EdgeColor','none');
-                hb(1).FaceColor = [0.20 0.45 0.85];
-                hb(2).FaceColor = [0.95 0.55 0.10];
-                hold on;
-                xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
-                      'Label','S=2.0','LabelHorizontalAlignment','left');
-                xlim([0 2.0]); grid on;
-                xlabel('S level'); ylabel('point count');
-                title(sprintf('S<=2 by rendered color  teal=%d  yellow-spill=%d', ...
-                              numel(seg4_teal), numel(seg4_yellow)));
-                legend({'teal-side (R<=B)','yellow-spill (R>B)'}, ...
-                       'Location','northeast','FontSize',8);
-
-                % --- Panel 5: 2.0<S<=cax_hi by rendered color ---
-                nexttile;
-                seg5_raw = Sraw(Sraw > 2.0 & Sraw <= cax_hi);
-                edges5 = 2.0:max(0.1, (cax_hi-2.0)/35):cax_hi;
-                if ~isempty(seg5_raw)
-                    seg5_safe = max(seg5_raw, cax_lo);
-                    tvals5 = (log(seg5_safe) - log(cax_lo)) / max(eps, (log(cax_hi) - log(cax_lo)));
-                    tvals5 = min(1, max(0, tvals5));
-                    R5 = 0.0 *(1-tvals5).^2 + 0.129*2.*tvals5.*(1-tvals5) + 0.993*tvals5.^2;
-                    B5 = 0.35*(1-tvals5).^2 + 0.692*2.*tvals5.*(1-tvals5) + 0.144*tvals5.^2;
-                    teal_mask5 = (R5 <= B5);
-                    seg5_teal   = seg5_raw(teal_mask5);
-                    seg5_yellow = seg5_raw(~teal_mask5);
-                else
-                    seg5_teal = [];
-                    seg5_yellow = [];
-                end
-
-                counts_teal5   = histcounts(seg5_teal,   edges5);
-                counts_yellow5 = histcounts(seg5_yellow, edges5);
-                centers5 = 0.5*(edges5(1:end-1)+edges5(2:end));
-                hb5 = bar(centers5, [counts_teal5; counts_yellow5]', ...
-                          'stacked', 'BarWidth', 1.0, 'EdgeColor','none');
-                hb5(1).FaceColor = [0.20 0.45 0.85];
-                hb5(2).FaceColor = [0.95 0.55 0.10];
-                hold on;
-                xline(SParams.S_THR, '-', 'Color',[0 0 0], 'LineWidth',1.4, ...
-                      'Label','S=2.0','LabelHorizontalAlignment','right');
-                xlim([2.0 cax_hi]); grid on;
-                xlabel('S level'); ylabel('point count');
-                title(sprintf('2.0<S<=%.1f by rendered color  yellow=%d  blue-spill=%d', ...
-                              cax_hi, numel(seg5_yellow), numel(seg5_teal)));
-                legend({'blue-spill (R<=B)','yellow-side (R>B)'}, ...
-                       'Location','northeast','FontSize',8);
-
-                sgtitle(sprintf('Cycle %d: RAW computed S at grid points (n=%d)  NO interpolation/smoothing', ...
-                        it, numel(Sraw)), 'FontWeight','bold');
-                drawnow;
-            end
 
             % ---- PER-CYCLE BLOB MAP (mirrors final blob figure 7001) ----
             figBlob = figure(8000 + it); clf;
@@ -1401,47 +1109,6 @@ xlim([cStar cycles]);
 fprintf('Low-stretch area fit (actual cycle axis):            A = %.6e * exp(%.6f * c), tau = %.6f cycles\n', A0A, kA, tauA);
 fprintf('All low-stretch blobs total fit (actual cycle axis): A = %.6e * exp(%.6f * c), tau = %.6f cycles\n', A0B, kB, tauB);
 
-%% -- EXPERIMENT: Nwin sweep (does the window length change the mixing?) --
-% Recomputes the RAW S scatter on a cheap coarse grid for several window
-% lengths. If low-stretch regions are cohesive at small Nwin and get
-% progressively shredded as Nwin grows, the mixing is window-length driven
-% (stretching accumulates), not measurement noise.
-% NOTE: kick strength K cannot be swept here — the kicks are the recorded
-% history. To test K, change it at the top of the script and re-run.
-if SParams.EXPERIMENT_NWIN_SWEEP
-    fprintf('EXPERIMENT: Nwin sweep (coarse raw scatter) ...\n');
-    Tall = numel(dp_x_hist);
-    nwin_list = unique(min([max(2, round(SParams.Nwin/2)), SParams.Nwin, 2*SParams.Nwin], Tall));
-    stepSweep = max(SParams.NWIN_SWEEP_STEP, SParams.FIELD_STEP);
-    xs_sw = 1:stepSweep:cols;
-    ys_sw = 1:stepSweep:rows;
-
-    figNW = figure(9500); clf;
-    set(figNW,'Color','w','Position',[40 40 min(560*numel(nwin_list),1750) 640], ...
-        'Name','EXPERIMENT: Nwin sweep (raw S scatter, no interp)');
-    tiledlayout(1, numel(nwin_list), 'TileSpacing','compact', 'Padding','compact');
-
-    for kNW = 1:numel(nwin_list)
-        NwK = nwin_list(kNW);
-        t0K = max(0, Tall - NwK);
-        swp = raw_S_probe(dp_x_hist, row0, Tau, rows, cols, t0K, NwK, SParams, xs_sw, ys_sw);
-
-        nexttile;
-        scatter_S_ontop(swp.x, swp.y, swp.S, 12);   % low-S on top
-        axis image; axis ij; axis off;
-        xlim([1 cols]); ylim([1 rows]);
-        colormap(gca, cmap_blue_yellow); colorbar;
-        apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
-        nLo = nnz(swp.S <= SParams.S_THR);
-        title(sprintf('Nwin=%d | low(S<=%.1f)=%d/%d (%.1f%%)', ...
-              NwK, SParams.S_THR, nLo, numel(swp.S), 100*nLo/max(1,numel(swp.S))));
-    end
-    sgtitle(sprintf(['EXPERIMENT: window-length dependence of stretching  ' ...
-                     '(raw S at FINAL positions, grid step=%d, after cycle %d)'], ...
-            stepSweep, cycles), 'FontWeight','bold');
-    drawnow;
-end
-
 %% ========================================================================
 %%  E)  FINAL FULL-RESOLUTION BLOB ANALYSIS
 %%      Runs once after the last cycle on the finest available S-field.
@@ -1913,13 +1580,7 @@ stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_pa
 end
 
 % ------------------- S magnitude field vs start (this is the "contour plot") -------------------
-function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final, Trfine, Trfine_final, Sscatter] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
-% Sscatter (EXPERIMENT): struct with the RAW computed values — no
-%   interpolation, no smoothing. Fields:
-%     .x, .y   — 1-based FINAL pixel coords of each coarse probe
-%     .x0, .y0 — 1-based START grid coords of each probe
-%     .S       — max-singular-value S at that probe
-%     .Tr      — trace(M) at that probe (|Tr|<2 elliptic, |Tr|>2 hyperbolic)
+function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final, Trfine, Trfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
 % Computes scalar fields S(x0,y0), rotation θ(x0,y0), and trace(M) on a
 % coarse grid, smooths them, then interpolates to full resolution.
 %
@@ -1932,19 +1593,6 @@ function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final, 
 %                                 |trace|>2 = hyperbolic (saddle, stretching)
 
 step = P.FIELD_STEP;
-
-% EXPERIMENT safety: cap total probes so MATLAB never appears frozen for
-% hours. If the requested step would exceed MAX_PROBES, coarsen and warn.
-maxP = 300000;
-if isfield(P, 'MAX_PROBES'), maxP = P.MAX_PROBES; end
-while (floor((H-1)/step)+1) * (floor((W-1)/step)+1) > maxP
-    step = step + 1;
-end
-if step ~= P.FIELD_STEP
-    warning('Sfield_snapshot: FIELD_STEP %d -> %d to keep probe count <= %d (safety cap).', ...
-            P.FIELD_STEP, step, maxP);
-end
-
 ys = 1:step:H;   % 1-based for plotting
 xs = 1:step:W;
 
@@ -1952,12 +1600,6 @@ Scoarse = nan(numel(ys), numel(xs));
 Rotcoarse = nan(numel(ys), numel(xs));
 Trcoarse = nan(numel(ys), numel(xs));
 maskC   = false(numel(ys), numel(xs));
-
-% Determinant diagnostics: det BEFORE any symplectic rescale, plus the S we
-% WOULD have recorded at every probe (including rejected ones) so rejection
-% can be correlated with local stretching.
-DetCoarse   = nan(numel(ys), numel(xs));
-Swould      = nan(numel(ys), numel(xs));
 
 % Store final positions for each coarse grid point
 finalY_coarse = nan(numel(ys), numel(xs));
@@ -1970,14 +1612,6 @@ for iy = 1:numel(ys)
 
         [M_raw, xyNw] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
         [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, 5e-3);
-
-        % det_raw is now the TRUE pre-rescale determinant (M_raw is no longer
-        % pre-normalized), so this check is live rather than dead code.
-        DetCoarse(iy,ix) = det_raw;
-        if ~isempty(M_sym)
-            % S we would have recorded here, even if the probe is rejected
-            Swould(iy,ix) = monodromy_to_Smax(M_sym);
-        end
 
         if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
             continue;
@@ -2024,39 +1658,6 @@ Rotvals = Rotcoarse(validC);
 Trvals  = Trcoarse(validC);
 fxVals = finalX_coarse(validC);   % 1-based x of final position
 fyVals = finalY_coarse(validC);   % 1-based y of final position
-
-% EXPERIMENT: package the raw (unsmoothed, un-interpolated) computed values
-% for the scatter/experiment views.  x,y = FINAL positions; x0,y0 = START
-% grid positions; Tr = trace(M) (|Tr|<2 elliptic, |Tr|>2 hyperbolic).
-Sscatter = struct('x', fxVals(:), 'y', fyVals(:), 'S', Svals(:), ...
-                  'x0', Xc(validC), 'y0', Yc(validC), 'Tr', Trvals(:));
-
-% ---- determinant / rejection diagnostics ----
-% Now that det_raw is measured before the symplectic rescale, the DET_TOL
-% gate actually rejects probes. Quantify how many, and whether rejection
-% tracks local stretching (FD accuracy degrades where the map stretches).
-nTot   = numel(maskC);
-nRej   = nnz(~maskC);
-dev    = abs(DetCoarse - 1);                 % |det - 1| at every probe
-bad    = ~isfinite(DetCoarse) | DetCoarse <= 0;
-haveSw = isfinite(Swould);
-loSw   = haveSw & (Swould <= P.S_THR);       % would-be low-stretch probes
-hiSw   = haveSw & (Swould >  P.S_THR);       % would-be high-stretch probes
-
-Sscatter.diag = struct( ...
-    'n_probes',      nTot, ...
-    'n_rejected',    nRej, ...
-    'reject_frac',   nRej / max(1,nTot), ...
-    'n_bad_det',     nnz(bad), ...
-    'n_tol_fail',    nnz(~maskC & ~bad), ...
-    'med_absdev',    median(dev(isfinite(dev))), ...
-    'max_absdev',    max(dev(isfinite(dev))), ...
-    'med_absdev_lowS',  median(dev(loSw & isfinite(dev))), ...
-    'med_absdev_highS', median(dev(hiSw & isfinite(dev))), ...
-    'rejfrac_lowS',  nnz(~maskC & loSw) / max(1, nnz(loSw)), ...
-    'rejfrac_highS', nnz(~maskC & hiSw) / max(1, nnz(hiSw)), ...
-    'S_kept_med',    median(Scoarse(maskC)), ...
-    'S_rej_med',     median(Swould(~maskC & haveSw)));
 
 if numel(Svals) >= 4
     % Use scatteredInterpolant for smooth coverage of the full grid
@@ -2110,52 +1711,6 @@ Sout = num ./ max(den, 1e-12);
 Sout(den < 0.15) = NaN;  % if we had almost no data support, keep it NaN
 end
 
-% ---- EXPERIMENT: raw monodromy probe over an arbitrary grid ----
-function out = raw_S_probe(dp_x_hist, row0, Tau, H, W, t0, Nwin, P, xs, ys)
-% Probes the Nwin-step monodromy at every (xs, ys) lattice point (1-based
-% pixel coords). NO smoothing, NO interpolation. Returns column vectors:
-%   .x0,.y0 — start coords   .x,.y — final coords
-%   .S      — sigma_max(M)   .Tr   — trace(M)
-[XS, YS] = meshgrid(xs, ys);
-n = numel(XS);
-x0v = nan(n,1); y0v = nan(n,1); xv = nan(n,1); yv = nan(n,1);
-Sv  = nan(n,1); Trv = nan(n,1); Dv = nan(n,1);
-k = 0;
-nRej = 0;
-for i = 1:n
-    y0 = double(YS(i) - 1);   % dynamics uses 0-based
-    x0 = double(XS(i) - 1);
-    [M_raw, xyNw] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
-    % det_raw is the true pre-rescale determinant (M_raw is not normalized)
-    [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, 5e-3);
-    if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
-        nRej = nRej + 1;
-        continue;
-    end
-    k = k + 1;
-    x0v(k) = XS(i);  y0v(k) = YS(i);
-    xv(k)  = mod(xyNw(1), W) + 1;
-    yv(k)  = mod(xyNw(2), H) + 1;
-    Sv(k)  = monodromy_to_Smax(M_sym);
-    Trv(k) = M_sym(1,1) + M_sym(2,2);
-    Dv(k)  = det_raw;
-end
-out = struct('x0', x0v(1:k), 'y0', y0v(1:k), 'x', xv(1:k), 'y', yv(1:k), ...
-             'S', Sv(1:k), 'Tr', Trv(1:k), 'det', Dv(1:k), ...
-             'n_probes', n, 'n_rejected', nRej);
-end
-
-% ---- EXPERIMENT: scatter raw S with low-S drawn LAST (on top) ----
-function scatter_S_ontop(xv, yv, Sv, sz)
-% scatter() paints in list order, so a later high-S dot can bury an earlier
-% low-S dot and make a region look purely stretched when it is not. Sorting
-% by DESCENDING S draws the low-stretch points last, so they can never be
-% hidden by high-stretch points.
-if isempty(Sv), return; end
-[~, ord] = sort(Sv(:), 'descend');
-scatter(xv(ord), yv(ord), sz, Sv(ord), 'filled');
-end
-
 function Smax = monodromy_to_Smax(M)
 [~,Sig,~] = svd(M);
 Smax = Sig(1,1);
@@ -2175,8 +1730,7 @@ switch lower(func)
     case 'symplectify2x2'
         [varargout{1}, varargout{2}] = symplectify2x2(varargin{:});
     case 'monodromy_with_final'
-        % nargout-aware: callers may request [M], [M,xyNw], or [M,xyNw,det_raw]
-        [varargout{1:max(nargout,1)}] = monodromy_with_final_vert(varargin{:});
+        [varargout{1}, varargout{2}] = monodromy_with_final_vert(varargin{:});
     otherwise
         error('kd_dyn_vert:unknown', 'Unknown command "%s".', func);
 end
@@ -2203,11 +1757,7 @@ fx=x-x0;
 dpy = dp_x(i0+1) + (dp_x(i1+1)-dp_x(i0+1))*fx;
 end
 
-function [M, xyNw, detM_raw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, symplectify_if, det_tol)
-% detM_raw is the determinant of the FD monodromy BEFORE any symplectic
-% rescale. This is the only meaningful accuracy diagnostic: the exact map is
-% area-preserving, so det should be 1, and |detM_raw - 1| measures how badly
-% the finite-difference stencil has broken down at this point.
+function [M, xyNw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, symplectify_if, det_tol)
 if nargin<10 || isempty(eps_),           eps_ = 1e-3; end
 if nargin<11 || isempty(symplectify_if), symplectify_if = true; end
 if nargin<12 || isempty(det_tol),        det_tol = 5e-3; end
@@ -2263,34 +1813,25 @@ col1 = [(xNxp - xNxm)/(2*eps_) ; (yNxp - yNxm)/(2*eps_)];
 col2 = [(xNyp - xNym)/(2*eps_) ; (yNyp - yNym)/(2*eps_)];
 M    = [col1, col2];
 
-% Capture the determinant BEFORE any rescale — this is the real diagnostic.
-detM_raw = det(M);
-
 if symplectify_if
-    if ~isfinite(detM_raw) || detM_raw <= 0.0
+    detM = det(M);
+    if ~isfinite(detM) || detM <= 0.0
         xyNw = [xN0w, yN0w];
         return;
     end
-    if abs(detM_raw - 1.0) > det_tol
-        M = M ./ sqrt(detM_raw);
+    if abs(detM - 1.0) > det_tol
+        M = M ./ sqrt(detM);
     end
 end
 
 xyNw = [xN0w, yN0w];
 end
 
-function [M, xyNw, det_raw] = monodromy_with_final_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0, eps_, use_fd)
+function [M, xyNw] = monodromy_with_final_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0, eps_, use_fd)
 if nargin<10, eps_=1e-3; end
 if nargin<11, use_fd=true; end
 if use_fd
-    % symplectify_if = FALSE on purpose.  Previously this was true, which
-    % rescaled M by 1/sqrt(det) here; every caller then measured det on the
-    % ALREADY-normalized matrix, so det_raw was ~1 to machine precision and
-    % the downstream |det-1| > DET_TOL sanity check could never fire (dead
-    % code).  Returning the raw M plus its pre-rescale determinant makes
-    % that check meaningful.  Callers that only want the normalized matrix
-    % still get it from symplectify2x2, which rescales identically.
-    [M, xyNw, det_raw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, false);
+    [M, xyNw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, true);
 else
     error('This version uses FD monodromy. Set use_fd=true.');
 end
