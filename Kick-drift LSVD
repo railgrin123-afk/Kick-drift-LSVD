@@ -108,7 +108,7 @@ SParams.FIELD_ALPHA       = 0.28;  % transparency when overlaying on the image
 SParams.S_CLIP_MAX        = 15;    % color scale upper cap for display (logarithmic, so high S compressed)
 
 % Zoom-window (A/B/C) settings
-SParams.ZOOM_WIN_PX       = 300;   % zoom window size in pixels (square)
+SParams.ZOOM_WIN_PX       = 450;   % zoom window size in pixels (square)
 SParams.S_CROSS           = 5.26;  % colormap crossover: above this the cmap renders yellow-side (R>B)
 
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
