@@ -254,6 +254,19 @@ for it = 1:cycles
     if SHOW_S_FIELD_FIG
         [Sfine, maskFine, Sfine_final, maskFine_final, ~, Rotfine_final, ~, Trfine_final, Sscatter] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
+
+        % ---- determinant-rejection log (the DET_TOL check is now live) ----
+        if isfield(Sscatter, 'diag')
+            d = Sscatter.diag;
+            fprintf(['cycle %2d | probes=%6d  rejected=%6d (%5.2f%%)  ' ...
+                     '[bad-det=%d, |det-1|>tol=%d]  med|det-1|=%.3e (max=%.3e)\n'], ...
+                    it, d.n_probes, d.n_rejected, 100*d.reject_frac, ...
+                    d.n_bad_det, d.n_tol_fail, d.med_absdev, d.max_absdev);
+            fprintf(['         | by stretch: reject low-S=%5.2f%% vs high-S=%5.2f%%  |  ' ...
+                     'med|det-1| low-S=%.3e vs high-S=%.3e  |  medS kept=%.3f rejected=%.3f\n'], ...
+                    100*d.rejfrac_lowS, 100*d.rejfrac_highS, ...
+                    d.med_absdev_lowS, d.med_absdev_highS, d.S_kept_med, d.S_rej_med);
+        end
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
         y2bMask_final = false(rows, cols);
 
@@ -511,10 +524,11 @@ for it = 1:cycles
 
             sc_lo = Sscatter.S <= SParams.S_THR;   % low-stretch points
 
-            % no marker edges: at step=2 density the dark edges would drown
-            % out the fill colors
-            scatter(Sscatter.x(:), Sscatter.y(:), SParams.SCATTER_DOT_SIZE, ...
-                    Sscatter.S(:), 'filled');
+            % Low-S drawn LAST so high-S dots can never bury them (see
+            % scatter_S_ontop). No marker edges: at this density the dark
+            % edges would drown out the fill colors.
+            scatter_S_ontop(Sscatter.x(:), Sscatter.y(:), Sscatter.S(:), ...
+                            SParams.SCATTER_DOT_SIZE);
             axis image; axis ij; axis off;      % ij => image orientation (y down)
             xlim([1 cols]); ylim([1 rows]);
             colormap(figSC, cmap_blue_yellow);
@@ -548,7 +562,7 @@ for it = 1:cycles
                 figROI = figure(5700 + it); clf;
                 set(figROI,'Color','w','Position',[120 120 820 760], ...
                     'Name', sprintf('Cycle %d: ROI zoom, raw S at %d-px spacing', it, SParams.ROI_STEP));
-                scatter(roi.x0, roi.y0, 14, roi.S, 'filled');
+                scatter_S_ontop(roi.x0, roi.y0, roi.S, 14);   % low-S on top
                 axis image; axis ij;
                 xlim([xs_roi(1) xs_roi(end)]); ylim([ys_roi(1) ys_roi(end)]);
                 colormap(figROI, cmap_blue_yellow);
@@ -556,9 +570,10 @@ for it = 1:cycles
                 apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
                 roi_lo = roi.S <= SParams.S_THR;
                 title(sprintf(['cycle %d: ROI [%d..%d]x[%d..%d] START coords, step=%d px | ' ...
-                               'low(S<=%.1f)=%d / %d (%.1f%%)'], ...
+                               'low(S<=%.1f)=%d / %d (%.1f%%) | det-rejected=%d/%d (%.1f%%)'], ...
                       it, xs_roi(1), xs_roi(end), ys_roi(1), ys_roi(end), SParams.ROI_STEP, ...
-                      SParams.S_THR, nnz(roi_lo), numel(roi.S), 100*nnz(roi_lo)/numel(roi.S)));
+                      SParams.S_THR, nnz(roi_lo), numel(roi.S), 100*nnz(roi_lo)/numel(roi.S), ...
+                      roi.n_rejected, roi.n_probes, 100*roi.n_rejected/max(1,roi.n_probes)));
                 drawnow;
             end
         end
@@ -1412,9 +1427,7 @@ if SParams.EXPERIMENT_NWIN_SWEEP
         swp = raw_S_probe(dp_x_hist, row0, Tau, rows, cols, t0K, NwK, SParams, xs_sw, ys_sw);
 
         nexttile;
-        if ~isempty(swp.S)
-            scatter(swp.x, swp.y, 12, swp.S, 'filled');
-        end
+        scatter_S_ontop(swp.x, swp.y, swp.S, 12);   % low-S on top
         axis image; axis ij; axis off;
         xlim([1 cols]); ylim([1 rows]);
         colormap(gca, cmap_blue_yellow); colorbar;
@@ -1940,6 +1953,12 @@ Rotcoarse = nan(numel(ys), numel(xs));
 Trcoarse = nan(numel(ys), numel(xs));
 maskC   = false(numel(ys), numel(xs));
 
+% Determinant diagnostics: det BEFORE any symplectic rescale, plus the S we
+% WOULD have recorded at every probe (including rejected ones) so rejection
+% can be correlated with local stretching.
+DetCoarse   = nan(numel(ys), numel(xs));
+Swould      = nan(numel(ys), numel(xs));
+
 % Store final positions for each coarse grid point
 finalY_coarse = nan(numel(ys), numel(xs));
 finalX_coarse = nan(numel(ys), numel(xs));
@@ -1951,6 +1970,14 @@ for iy = 1:numel(ys)
 
         [M_raw, xyNw] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
         [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, 5e-3);
+
+        % det_raw is now the TRUE pre-rescale determinant (M_raw is no longer
+        % pre-normalized), so this check is live rather than dead code.
+        DetCoarse(iy,ix) = det_raw;
+        if ~isempty(M_sym)
+            % S we would have recorded here, even if the probe is rejected
+            Swould(iy,ix) = monodromy_to_Smax(M_sym);
+        end
 
         if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
             continue;
@@ -2003,6 +2030,33 @@ fyVals = finalY_coarse(validC);   % 1-based y of final position
 % grid positions; Tr = trace(M) (|Tr|<2 elliptic, |Tr|>2 hyperbolic).
 Sscatter = struct('x', fxVals(:), 'y', fyVals(:), 'S', Svals(:), ...
                   'x0', Xc(validC), 'y0', Yc(validC), 'Tr', Trvals(:));
+
+% ---- determinant / rejection diagnostics ----
+% Now that det_raw is measured before the symplectic rescale, the DET_TOL
+% gate actually rejects probes. Quantify how many, and whether rejection
+% tracks local stretching (FD accuracy degrades where the map stretches).
+nTot   = numel(maskC);
+nRej   = nnz(~maskC);
+dev    = abs(DetCoarse - 1);                 % |det - 1| at every probe
+bad    = ~isfinite(DetCoarse) | DetCoarse <= 0;
+haveSw = isfinite(Swould);
+loSw   = haveSw & (Swould <= P.S_THR);       % would-be low-stretch probes
+hiSw   = haveSw & (Swould >  P.S_THR);       % would-be high-stretch probes
+
+Sscatter.diag = struct( ...
+    'n_probes',      nTot, ...
+    'n_rejected',    nRej, ...
+    'reject_frac',   nRej / max(1,nTot), ...
+    'n_bad_det',     nnz(bad), ...
+    'n_tol_fail',    nnz(~maskC & ~bad), ...
+    'med_absdev',    median(dev(isfinite(dev))), ...
+    'max_absdev',    max(dev(isfinite(dev))), ...
+    'med_absdev_lowS',  median(dev(loSw & isfinite(dev))), ...
+    'med_absdev_highS', median(dev(hiSw & isfinite(dev))), ...
+    'rejfrac_lowS',  nnz(~maskC & loSw) / max(1, nnz(loSw)), ...
+    'rejfrac_highS', nnz(~maskC & hiSw) / max(1, nnz(hiSw)), ...
+    'S_kept_med',    median(Scoarse(maskC)), ...
+    'S_rej_med',     median(Swould(~maskC & haveSw)));
 
 if numel(Svals) >= 4
     % Use scatteredInterpolant for smooth coverage of the full grid
@@ -2065,14 +2119,17 @@ function out = raw_S_probe(dp_x_hist, row0, Tau, H, W, t0, Nwin, P, xs, ys)
 [XS, YS] = meshgrid(xs, ys);
 n = numel(XS);
 x0v = nan(n,1); y0v = nan(n,1); xv = nan(n,1); yv = nan(n,1);
-Sv  = nan(n,1); Trv = nan(n,1);
+Sv  = nan(n,1); Trv = nan(n,1); Dv = nan(n,1);
 k = 0;
+nRej = 0;
 for i = 1:n
     y0 = double(YS(i) - 1);   % dynamics uses 0-based
     x0 = double(XS(i) - 1);
     [M_raw, xyNw] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
+    % det_raw is the true pre-rescale determinant (M_raw is not normalized)
     [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, 5e-3);
     if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
+        nRej = nRej + 1;
         continue;
     end
     k = k + 1;
@@ -2081,9 +2138,22 @@ for i = 1:n
     yv(k)  = mod(xyNw(2), H) + 1;
     Sv(k)  = monodromy_to_Smax(M_sym);
     Trv(k) = M_sym(1,1) + M_sym(2,2);
+    Dv(k)  = det_raw;
 end
 out = struct('x0', x0v(1:k), 'y0', y0v(1:k), 'x', xv(1:k), 'y', yv(1:k), ...
-             'S', Sv(1:k), 'Tr', Trv(1:k));
+             'S', Sv(1:k), 'Tr', Trv(1:k), 'det', Dv(1:k), ...
+             'n_probes', n, 'n_rejected', nRej);
+end
+
+% ---- EXPERIMENT: scatter raw S with low-S drawn LAST (on top) ----
+function scatter_S_ontop(xv, yv, Sv, sz)
+% scatter() paints in list order, so a later high-S dot can bury an earlier
+% low-S dot and make a region look purely stretched when it is not. Sorting
+% by DESCENDING S draws the low-stretch points last, so they can never be
+% hidden by high-stretch points.
+if isempty(Sv), return; end
+[~, ord] = sort(Sv(:), 'descend');
+scatter(xv(ord), yv(ord), sz, Sv(ord), 'filled');
 end
 
 function Smax = monodromy_to_Smax(M)
@@ -2105,7 +2175,8 @@ switch lower(func)
     case 'symplectify2x2'
         [varargout{1}, varargout{2}] = symplectify2x2(varargin{:});
     case 'monodromy_with_final'
-        [varargout{1}, varargout{2}] = monodromy_with_final_vert(varargin{:});
+        % nargout-aware: callers may request [M], [M,xyNw], or [M,xyNw,det_raw]
+        [varargout{1:max(nargout,1)}] = monodromy_with_final_vert(varargin{:});
     otherwise
         error('kd_dyn_vert:unknown', 'Unknown command "%s".', func);
 end
@@ -2132,7 +2203,11 @@ fx=x-x0;
 dpy = dp_x(i0+1) + (dp_x(i1+1)-dp_x(i0+1))*fx;
 end
 
-function [M, xyNw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, symplectify_if, det_tol)
+function [M, xyNw, detM_raw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, symplectify_if, det_tol)
+% detM_raw is the determinant of the FD monodromy BEFORE any symplectic
+% rescale. This is the only meaningful accuracy diagnostic: the exact map is
+% area-preserving, so det should be 1, and |detM_raw - 1| measures how badly
+% the finite-difference stencil has broken down at this point.
 if nargin<10 || isempty(eps_),           eps_ = 1e-3; end
 if nargin<11 || isempty(symplectify_if), symplectify_if = true; end
 if nargin<12 || isempty(det_tol),        det_tol = 5e-3; end
@@ -2188,25 +2263,34 @@ col1 = [(xNxp - xNxm)/(2*eps_) ; (yNxp - yNxm)/(2*eps_)];
 col2 = [(xNyp - xNym)/(2*eps_) ; (yNyp - yNym)/(2*eps_)];
 M    = [col1, col2];
 
+% Capture the determinant BEFORE any rescale — this is the real diagnostic.
+detM_raw = det(M);
+
 if symplectify_if
-    detM = det(M);
-    if ~isfinite(detM) || detM <= 0.0
+    if ~isfinite(detM_raw) || detM_raw <= 0.0
         xyNw = [xN0w, yN0w];
         return;
     end
-    if abs(detM - 1.0) > det_tol
-        M = M ./ sqrt(detM);
+    if abs(detM_raw - 1.0) > det_tol
+        M = M ./ sqrt(detM_raw);
     end
 end
 
 xyNw = [xN0w, yN0w];
 end
 
-function [M, xyNw] = monodromy_with_final_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0, eps_, use_fd)
+function [M, xyNw, det_raw] = monodromy_with_final_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0, eps_, use_fd)
 if nargin<10, eps_=1e-3; end
 if nargin<11, use_fd=true; end
 if use_fd
-    [M, xyNw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, true);
+    % symplectify_if = FALSE on purpose.  Previously this was true, which
+    % rescaled M by 1/sqrt(det) here; every caller then measured det on the
+    % ALREADY-normalized matrix, so det_raw was ~1 to machine precision and
+    % the downstream |det-1| > DET_TOL sanity check could never fire (dead
+    % code).  Returning the raw M plus its pre-rescale determinant makes
+    % that check meaningful.  Callers that only want the normalized matrix
+    % still get it from symplectify2x2, which rescales identically.
+    [M, xyNw, det_raw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, false);
 else
     error('This version uses FD monodromy. Set use_fd=true.');
 end
