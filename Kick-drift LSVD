@@ -686,22 +686,25 @@ for it = 1:cycles
                 % by blob identity -- blobs are not tracked across cycles. So
                 % this finds the RANK whose area moved most, then takes that
                 % rank's blob in the current cycle.
+                % Rank 1 is excluded: it is window A by definition, and being
+                % the largest blob it almost always has the largest ABSOLUTE
+                % area change too, which would collapse B onto A every cycle
+                % and hide A's rectangle underneath B's.
                 idxB = []; kB = NaN; dB = NaN;
-                if ~isempty(sortZ_idx) && it > 1
+                if numel(sortZ_idx) >= 2 && it > 1
                     cur_r = low_blob_rank_area_px_fullres(it,   :);
                     prv_r = low_blob_rank_area_px_fullres(it-1, :);
                     dR    = abs(cur_r - prv_r);
+                    dR(1) = NaN;                          % exclude rank 1 (= A)
+                    dR(min(numel(dR), numel(sortZ_idx))+1 : end) = NaN;  % ranks with no blob this cycle
                     if any(isfinite(dR))
-                        [~, kB] = max(dR);            % max ignores NaN
-                        kB = min(kB, numel(sortZ_idx));
-                        dB = cur_r(kB) - prv_r(kB);   % signed change
+                        [~, kB] = max(dR);                % max ignores NaN
+                        dB = cur_r(kB) - prv_r(kB);       % signed change
                         idxB = CC_low_cycle{sortZ_idx(kB)};
                     end
                 end
                 if isempty(idxB) && numel(sortZ_idx) >= 2
                     kB = 2;  idxB = CC_low_cycle{sortZ_idx(2)};   % fallback: 2nd largest
-                elseif isempty(idxB) && ~isempty(sortZ_idx)
-                    kB = 1;  idxB = CC_low_cycle{sortZ_idx(1)};
                 end
 
                 % --- C: largest mid-stretch component (S_THR < S < S_CROSS) ---
@@ -755,13 +758,17 @@ for it = 1:cycles
                 cbZ.Label.String = 'S = \sigma_{max}(M)   (log scale)';
                 contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.0);
 
-                for q = 1:3
+                % Draw C, then B, then A, so A ends up on TOP and stays
+                % visible even if two windows land on the same region.
+                for q = [3 2 1]
                     if isempty(zWin{q}), continue; end
                     r0 = zWin{q}(1); r1 = zWin{q}(2);
                     c0 = zWin{q}(3); c1 = zWin{q}(4);
                     rectangle('Position', [c0-0.5, r0-0.5, c1-c0+1, r1-r0+1], ...
                               'EdgeColor', zCol{q}, 'LineWidth', 2.5);
-                    text(c0+6, r0+18, zLab{q}, 'Color', zCol{q}, ...
+                    % nudge each label to a different corner so coincident
+                    % windows do not stack their letters on top of each other
+                    text(c0+6, r0+18+22*(q-1), zLab{q}, 'Color', zCol{q}, ...
                          'FontSize', 18, 'FontWeight','bold', ...
                          'BackgroundColor',[0 0 0 0.45]);
                 end
@@ -796,6 +803,10 @@ for it = 1:cycles
                     % colored frame linking the inset to its rectangle
                     set(axI, 'XTick', [], 'YTick', [], 'Box', 'on', ...
                              'XColor', zCol{q}, 'YColor', zCol{q}, 'LineWidth', 2.5);
+                    % hide the hover toolbar; it overlaps the title text
+                    if isprop(axI, 'Toolbar') && ~isempty(axI.Toolbar)
+                        axI.Toolbar.Visible = 'off';
+                    end
                     title(axI, zTitle{q}, 'Color', zCol{q}*0.75, 'FontSize', 9);
                 end
                 drawnow;
