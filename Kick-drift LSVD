@@ -71,7 +71,7 @@ c_x   = exp(-(xgrid.^2)/(lc^2));
 cf_x  = randpot1d_getFFT(c_x);
 
 % history
-img_hist = {};
+n_frames = 0;   % frame counter (frames themselves are not retained)
 dp_x_hist = {};
 
 % -------------------- display toggles --------------------
@@ -84,8 +84,15 @@ SHOW_S_FIELD_FIG       = true;
 % overlay S field on the dot figure (semi-transparent)
 OVERLAY_S_FIELD_ON_DOTS = true;
 
-% per-cycle A/B/C zoom-window figure (8500+it) on the S-field
+% per-cycle A/B/C zoom-window figure on the kick-drift composite
 SHOW_ZOOM_WINDOWS = true;
+
+% MEMORY: with KEEP_FIGS_PER_CYCLE=false every cycle REUSES one window per
+% figure kind, so the session holds ~6 figures instead of 6*cycles. Each
+% figure retains its image CData (~1920x1920 RGB is tens of MB), so keeping
+% one per cycle is what exhausts memory on longer runs. Set true only for
+% short runs where you want every cycle side by side.
+KEEP_FIGS_PER_CYCLE = false;
 
 % -------------------- S-map params --------------------
 SParams.Nwin      = 10;        % target window length; early cycles auto smaller
@@ -199,11 +206,14 @@ for it = 1:cycles
         stage2_img = warp_image(cur, @ForwardFullStep, struct('dp_x',dp_x,'row0',row0,'Tau',Tau));
     end
 
-    img_hist{end+1} = stage2_img; %#ok<SAGROW>
+    % MEMORY: img_hist used to keep every cycle's full RGB frame. At
+    % ~1920x1920x3 doubles that is ~88 MB per cycle and only the COUNT was
+    % ever read, so we keep a counter instead of the frames.
+    n_frames = n_frames + 1;
 
     % ---- (A) 3-panel BEFORE/KICK/DRIFT ----
     if SHOW_PANELS_EACH_CYCLE
-        figA = figure(2000 + it);
+        figA = figure(fignum(2000, it, KEEP_FIGS_PER_CYCLE)); clf;
         set(figA,'Color','w','Position',[60 60 1500 420], ...
             'Name', sprintf('Cycle %d: before/kick/drift', it));
         tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
@@ -226,7 +236,7 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine, maskFine, Sfine_final, maskFine_final, ~, Rotfine_final, ~, Trfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+        [Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
         y2bMask_final = false(rows, cols);
@@ -367,7 +377,7 @@ for it = 1:cycles
             it, SParams.S_THR, area_blue_px(it), frac_blue(it), ...
             SParams.S_THR, area_yellow_px(it), frac_yellow(it));
 
-        figS = figure(5000 + it); clf;
+        figS = figure(fignum(5000, it, KEEP_FIGS_PER_CYCLE)); clf;
         set(figS,'Color','w','Position',[1000 80 900 900], ...
             'Name', sprintf('Cycle %d: S-field at CURRENT locations (banded regions)', it));
 
@@ -446,7 +456,7 @@ for it = 1:cycles
 
         % ---- S-field at CURRENT (FINAL) locations: standalone heatmap ----
         if ~isempty(Sfine_final)
-            figSF = figure(5500 + it); clf;
+            figSF = figure(fignum(5500, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figSF,'Color','w','Position',[1050 80 900 900], ...
                 'Name', sprintf('Cycle %d: S-field at CURRENT locations', it));
 
@@ -478,7 +488,7 @@ for it = 1:cycles
         if ~isempty(Sfine_final)
             Svals = Sfine_final(maskFine_final & isfinite(Sfine_final));
 
-            figH = figure(7000 + it); clf;
+            figH = figure(fignum(7000, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figH,'Color','w','Position',[80 540 2350 420], ...
                 'Name', sprintf('Cycle %d: S-distribution histograms', it));
             tiledlayout(1,5,'TileSpacing','compact','Padding','compact');
@@ -610,7 +620,7 @@ for it = 1:cycles
             drawnow;
 
             % ---- PER-CYCLE BLOB MAP (mirrors final blob figure 7001) ----
-            figBlob = figure(8000 + it); clf;
+            figBlob = figure(fignum(8000, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figBlob,'Color','w','Position',[100 60 1100 950], ...
                 'Name', sprintf('Cycle %d: S-field + numbered low-stretch blobs', it));
             hImB = imagesc(Sfine_final);
@@ -664,120 +674,8 @@ for it = 1:cycles
             end
             hold off; drawnow;
 
-            % ---- PER-CYCLE ROTATION + TRACE + CLASSIFICATION FIGURE ----
-            % 4 panels at FINAL (current) locations:
-            %   Panel 1: S-field        (stretching magnitude)
-            %   Panel 2: Rotation θ     (local angular momentum, radians, signed)
-            %   Panel 3: Trace(M)       (|tr|<2 = elliptic/rotating, |tr|>2 = hyperbolic/saddle)
-            %   Panel 4: Classification (combines S and |trace| into 4 regimes)
-            if exist('Rotfine_final','var') && ~isempty(Rotfine_final) && ...
-               exist('Trfine_final','var')  && ~isempty(Trfine_final)
-
-                figRot = figure(9000 + it); clf;
-                set(figRot,'Color','w','Position',[40 40 1700 1100], ...
-                    'Name', sprintf('Cycle %d: Stretching vs Rotation (Local Angular Momentum)', it));
-
-                % --- Panel 1: S-field ---
-                subplot(2,2,1);
-                hS = imagesc(Sfine_final);
-                set(hS,'AlphaData', double(maskFine_final));
-                axis image off;
-                colormap(gca, cmap_blue_yellow);
-                cb1 = colorbar; cb1.Label.String = 'S = max singular value (log scale)';
-                apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
-                hold on;
-                contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.5);
-                hold off;
-                title(sprintf('(1) STRETCHING field S(x_N,y_N)  |  white = S=%.1f', SParams.S_THR), ...
-                      'FontWeight','bold');
-
-                % --- Panel 2: Rotation angle (signed) ---
-                subplot(2,2,2);
-                hR = imagesc(Rotfine_final);
-                set(hR,'AlphaData', double(maskFine_final));
-                axis image off;
-                rot_vals_abs = abs(Rotfine_final(maskFine_final));
-                rot_vals_abs = rot_vals_abs(isfinite(rot_vals_abs));
-                if isempty(rot_vals_abs)
-                    rot_lim = pi;
-                else
-                    rot_lim = max(1e-3, prctile(rot_vals_abs, 98));
-                end
-                caxis([-rot_lim, rot_lim]);
-                cmap_rot = build_diverging_bwr(256);
-                colormap(gca, cmap_rot);
-                cb2 = colorbar; cb2.Label.String = '\theta (radians)  [- = CW, + = CCW]';
-                title('(2) ROTATION angle \theta (local angular momentum)', 'FontWeight','bold');
-
-                % --- Panel 3: Trace(M) ---
-                subplot(2,2,3);
-                hT = imagesc(Trfine_final);
-                set(hT,'AlphaData', double(maskFine_final));
-                axis image off;
-                tr_vals_abs = abs(Trfine_final(maskFine_final));
-                tr_vals_abs = tr_vals_abs(isfinite(tr_vals_abs));
-                if isempty(tr_vals_abs)
-                    tr_lim = 4;
-                else
-                    tr_lim = max(2.5, prctile(tr_vals_abs, 98));
-                end
-                caxis([-tr_lim, tr_lim]);
-                colormap(gca, cmap_rot);
-                cb3 = colorbar; cb3.Label.String = 'trace(M) = M_{11}+M_{22}';
-                hold on;
-                % |trace|=2 contour separates elliptic (rotating) from hyperbolic (stretching)
-                contour(Trfine_final, [-2 -2], 'k', 'LineWidth', 1.2, 'LineStyle','--');
-                contour(Trfine_final, [ 2  2], 'k', 'LineWidth', 1.2, 'LineStyle','--');
-                hold off;
-                title('(3) TRACE(M)  |  dashed = |tr|=2 (elliptic\leftrightarrowhyperbolic)', ...
-                      'FontWeight','bold');
-
-                % --- Panel 4: Combined classification ---
-                %   1: low-S + elliptic   = STABLE VORTEX (tornado eye)        cyan
-                %   2: low-S + hyperbolic = quiet stretch (frozen shear)        light blue
-                %   3: high-S + elliptic  = CHAOTIC VORTEX STRETCHING           magenta
-                %   4: high-S + hyperbolic= PURE STRETCH / TURBULENT SHEAR      orange
-                subplot(2,2,4);
-                low_S      = maskFine_final & (Sfine_final <= SParams.S_THR);
-                high_S     = maskFine_final & (Sfine_final >  SParams.S_THR);
-                elliptic   = maskFine_final & (abs(Trfine_final) <  2);
-                hyperbolic = maskFine_final & (abs(Trfine_final) >= 2);
-
-                Lclass = zeros(size(Sfine_final), 'uint8');
-                Lclass(low_S  & elliptic)   = 1;   % stable vortex
-                Lclass(low_S  & hyperbolic) = 2;   % quiet stretch
-                Lclass(high_S & elliptic)   = 3;   % chaotic vortex stretching
-                Lclass(high_S & hyperbolic) = 4;   % pure shear
-
-                class_cmap = [...
-                    0.00 0.85 0.95;   % 1: cyan      = stable vortex (tornado eye)
-                    0.55 0.75 0.95;   % 2: light blue= quiet stretch
-                    1.00 0.20 0.80;   % 3: magenta   = chaotic vortex stretching
-                    1.00 0.55 0.00];  % 4: orange    = pure shear / turbulent shear
-
-                hC = imagesc(double(Lclass));
-                set(hC,'AlphaData', double(Lclass>0));
-                axis image off;
-                colormap(gca, class_cmap);
-                caxis([0.5, 4.5]);
-                cb4 = colorbar;
-                cb4.Ticks      = 1:4;
-                cb4.TickLabels = {...
-                    'STABLE VORTEX  (low-S, elliptic)', ...
-                    'quiet stretch  (low-S, hyperbolic)', ...
-                    'CHAOTIC VORTEX (high-S, elliptic)', ...
-                    'PURE SHEAR     (high-S, hyperbolic)'};
-                title(sprintf('(4) CLASSIFICATION  |  S_{THR}=%.1f, |trace|=2 split', SParams.S_THR), ...
-                      'FontWeight','bold');
-
-                sgtitle(sprintf(['Cycle %d  |  Nwin=%d, t0=%d   ', ...
-                                 '\\bfPanels:\\rm  (1) stretching S   (2) rotation \\theta   (3) trace(M)   (4) regime classification'], ...
-                                 it, Nw, t0_recent), 'FontSize', 12);
-                drawnow;
-            end
         end
     else
-        Sfine = []; maskFine = [];
         Sfine_final = []; maskFine_final = [];
     end
 
@@ -790,7 +688,7 @@ for it = 1:cycles
         [xyLow, xyHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, Pnow, rows, cols);
 
         % ============ FIGURE: CURRENT-location S-field on cycle-0 frame ============
-        figB = figure(3000 + it);
+        figB = figure(fignum(3000, it, KEEP_FIGS_PER_CYCLE)); clf;
         set(figB,'Color','w','Position',[80 80 900 900], ...
             'Name', sprintf('Cycle %d: CURRENT-location S-field on cycle-0 frame', it));
 
@@ -825,7 +723,7 @@ for it = 1:cycles
 
         % ============ FIGURE: S-field at CURRENT (FINAL) locations on kick-drift map ============
         if ~isempty(Sfine_final)
-            figC = figure(4000 + it);
+            figC = figure(fignum(4000, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figC,'Color','w','Position',[100 100 900 900], ...
                 'Name', sprintf('Cycle %d: S-field at CURRENT locations (on kick-drift)', it));
 
@@ -940,6 +838,9 @@ for it = 1:cycles
                     if okw, break; end
                 end
             end
+            % CC_mid can hold millions of pixel indices across thousands of
+            % components; only idxC is needed from here on.
+            clear CC_mid midMask areasMid
 
             zIdx = {idxA, idxB, idxC};
             zWin = {winA, winB, winC};
@@ -960,7 +861,7 @@ for it = 1:cycles
                 zTitle{2} = sprintf('B: rank #%d  %d px  (no prev cycle)', kB, numel(idxB));
             end
 
-            figZ = figure(8500 + it); clf;
+            figZ = figure(fignum(8500, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figZ,'Color','w','Position',[60 40 1500 1050], ...
                 'Name', sprintf('Cycle %d: kick-drift + S-field, zoom windows A/B/C', it));
 
@@ -1007,8 +908,7 @@ for it = 1:cycles
                 axI = gca;                       % re-acquire after imshow
                 caxis(axI, climZ);               % SAME caxis as main panel
                 set(axI, 'ColorScale', 'log');   % SAME scaling as main panel
-                xlim(axI, [c0-0.5, c1+0.5]);
-                ylim(axI, [r0-0.5, r1+0.5]);
+                % (limits are set by kd_composite, which now crops to the window)
 
                 % coloured frame linking the inset back to its rectangle
                 set(axI, 'Visible', 'on', 'XTick', [], 'YTick', [], 'Box', 'on', ...
@@ -1034,11 +934,16 @@ for it = 1:cycles
         S_prev_final    = Sfine_final;
         mask_prev_final = maskFine_final;
 
+        % MEMORY: drop this cycle's heavy temporaries before the next
+        % iteration allocates its own. CC_low_cycle in particular holds one
+        % index list per low-stretch component at full resolution.
+        clear CC_low_cycle idxA idxB idxC zIdx zWin placedW blueMask yellowMask
+
     end
 end
 
 final_img = cur;
-fprintf('\nSim done: frames=%d, kicks=%d\n', numel(img_hist), numel(dp_x_hist));
+fprintf('\nSim done: frames=%d, kicks=%d\n', n_frames, numel(dp_x_hist));
 % -------------------- ADD-ON: save full SVD history --------------------
 if STORE_FULL_SVD_EACH_CYCLE
     save('full_svd_history.mat', 'svd_start_hist', '-v7.3');
@@ -1318,7 +1223,7 @@ Nw_fin   = min(SParams.Nwin, Tcur_fin);
 t0_fin   = max(0, Tcur_fin - Nw_fin);
 
 % Use Sfield_snapshot to get FINAL-location S-field (consistent with per-cycle plots)
-[~, ~, Sfin, maskFin] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+[Sfin, maskFin] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                         t0_fin, Nw_fin, SParams);
 
 valid_fin     = maskFin & isfinite(Sfin);
@@ -1759,25 +1664,27 @@ stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_pa
 end
 
 % ------------------- S magnitude field vs start (this is the "contour plot") -------------------
-function [Sfine, maskFine, Sfine_final, maskFine_final, Rotfine, Rotfine_final, Trfine, Trfine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
-% Computes scalar fields S(x0,y0), rotation θ(x0,y0), and trace(M) on a
-% coarse grid, smooths them, then interpolates to full resolution.
+function [Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+% Computes the stretching field S on a coarse grid, then interpolates it to
+% full resolution at the FINAL (current) particle locations.
 %
 % Returns:
-%   Sfine, maskFine             — S values at STARTING locations
 %   Sfine_final, maskFine_final — S values remapped to FINAL (current) locations
-%   Rotfine, Rotfine_final      — rotation angle (radians) at start/final locations
-%   Trfine,  Trfine_final       — trace(M) at start/final locations
-%                                 |trace|<2 = elliptic (rotating, stable)
-%                                 |trace|>2 = hyperbolic (saddle, stretching)
+%
+% MEMORY: this used to also return START-location fields and rotation/trace
+% fields (8 outputs). Nothing consumed them once the rotation/trace figure
+% was removed, yet each was a full HxW double -- at ~1920x1920 that is ~30 MB
+% apiece, plus three interp2 and two scatteredInterpolant passes over 3.7M
+% query points per cycle. They are no longer computed at all.
+% Sfine_final is returned as SINGLE: it is held across cycles (S_prev_final)
+% and pushed into graphics objects, and single halves that footprint while
+% staying far more precise than the colour scale can show.
 
 step = P.FIELD_STEP;
 ys = 1:step:H;   % 1-based for plotting
 xs = 1:step:W;
 
 Scoarse = nan(numel(ys), numel(xs));
-Rotcoarse = nan(numel(ys), numel(xs));
-Trcoarse = nan(numel(ys), numel(xs));
 maskC   = false(numel(ys), numel(xs));
 
 % Store final positions for each coarse grid point
@@ -1797,8 +1704,6 @@ for iy = 1:numel(ys)
         end
 
         Scoarse(iy,ix) = monodromy_to_Smax(M_sym);
-        Rotcoarse(iy,ix) = monodromy_to_rotation(M_sym);
-        Trcoarse(iy,ix) = M_sym(1,1) + M_sym(2,2);
         maskC(iy,ix)   = true;
 
         % Store final (current) positions (0-based -> 1-based for plotting)
@@ -1808,61 +1713,39 @@ for iy = 1:numel(ys)
 end
 
 % ---- START-location S, rotation, and trace fields ----
-% Smooth with NaN-aware Gaussian (prevents ugly pixel blocks)
-Ssm = smooth2_gaussian_nan(Scoarse, maskC, P.FIELD_SMOOTH_SIG);
-Rotsm = smooth2_gaussian_nan(Rotcoarse, maskC, P.FIELD_SMOOTH_SIG);
-Trsm = smooth2_gaussian_nan(Trcoarse, maskC, P.FIELD_SMOOTH_SIG);
-
-% Interpolate to full image resolution
-[Xc, Yc] = meshgrid(xs, ys);
-[Xf, Yf] = meshgrid(1:W, 1:H);
-
-Sfine = interp2(Xc, Yc, Ssm, Xf, Yf, 'linear', NaN);
-Rotfine = interp2(Xc, Yc, Rotsm, Xf, Yf, 'linear', NaN);
-Trfine = interp2(Xc, Yc, Trsm, Xf, Yf, 'linear', NaN);
-maskFine = isfinite(Sfine);
-
-% Clip for display (magnitude still correct, just not blown out visually)
-% REMOVED: Sfine(Sfine < 1) = 1;
-% REMOVED: Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
-
-% ---- FINAL-location fields (scattered interpolation) ----
-% Each coarse probe started at (xs(ix), ys(iy)) and ended at
-% (finalX, finalY).  We have S, rotation, and trace at each probe.
-% Now we want them on a regular grid indexed by FINAL (current) coords.
-
-validC = maskC & isfinite(Scoarse) & isfinite(Rotcoarse) & isfinite(Trcoarse);
+% ---- FINAL-location S field (scattered interpolation) ----
+% Each coarse probe started at (xs(ix), ys(iy)) and ended at (finalX,finalY).
+% We want S on a regular grid indexed by FINAL (current) coords.
+validC = maskC & isfinite(Scoarse);
 Svals  = Scoarse(validC);
-Rotvals = Rotcoarse(validC);
-Trvals  = Trcoarse(validC);
 fxVals = finalX_coarse(validC);   % 1-based x of final position
 fyVals = finalY_coarse(validC);   % 1-based y of final position
 
-if numel(Svals) >= 4
-    % Use scatteredInterpolant for smooth coverage of the full grid
-    F_S_interp = scatteredInterpolant(fxVals(:), fyVals(:), Svals(:), 'natural', 'nearest');
-    F_Rot_interp = scatteredInterpolant(fxVals(:), fyVals(:), Rotvals(:), 'natural', 'nearest');
-    F_Tr_interp  = scatteredInterpolant(fxVals(:), fyVals(:), Trvals(:),  'natural', 'nearest');
+% coarse arrays are done with -- free them before allocating full-res grids
+clear Scoarse maskC finalX_coarse finalY_coarse
 
-    [Xf, Yf] = meshgrid(1:W, 1:H);
-    Sfine_final = F_S_interp(Xf, Yf);
-    Rotfine_final = F_Rot_interp(Xf, Yf);
-    Trfine_final  = F_Tr_interp(Xf, Yf);
+if numel(Svals) >= 4
+    F_S_interp = scatteredInterpolant(fxVals(:), fyVals(:), Svals(:), 'natural', 'nearest');
+
+    % Evaluate row-block by row-block: a full [Xf,Yf] meshgrid would be two
+    % extra HxW doubles (~30 MB each at 1920x1920) alive at once alongside
+    % the result. Blocking keeps peak memory to one row-block.
+    Sfine_final = zeros(H, W, 'single');
+    xrow = 1:W;
+    blk  = max(1, floor(2e6 / max(W,1)));      % ~2M elements per block
+    for r0b = 1:blk:H
+        r1b = min(H, r0b + blk - 1);
+        [Xb, Yb] = meshgrid(xrow, r0b:r1b);
+        Sfine_final(r0b:r1b, :) = single(F_S_interp(Xb, Yb));
+    end
+    clear F_S_interp Xb Yb
 
     % Smooth lightly to remove interpolation noise
     maskF_raw = isfinite(Sfine_final);
-    Sfine_final = smooth2_gaussian_nan(Sfine_final, maskF_raw, P.FIELD_SMOOTH_SIG);
-    Rotfine_final = smooth2_gaussian_nan(Rotfine_final, maskF_raw, P.FIELD_SMOOTH_SIG);
-    Trfine_final  = smooth2_gaussian_nan(Trfine_final,  maskF_raw, P.FIELD_SMOOTH_SIG);
+    Sfine_final = single(smooth2_gaussian_nan(double(Sfine_final), maskF_raw, P.FIELD_SMOOTH_SIG));
     maskFine_final = isfinite(Sfine_final);
-
-    % Clip for display (REMOVED to preserve full data range)
-    % REMOVED: Sfine_final(Sfine_final < 1) = 1;
-    % REMOVED: Sfine_final(Sfine_final > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 else
-    Sfine_final = nan(H, W);
-    Rotfine_final = nan(H, W);
-    Trfine_final  = nan(H, W);
+    Sfine_final = nan(H, W, 'single');
     maskFine_final = false(H, W);
 end
 end
@@ -2104,17 +1987,24 @@ for r = 1:H
 end
 end
 
-function h = overlay_mask_rgb(mask, rgb, alpha)
+function h = overlay_mask_rgb(mask, rgb, alpha, xr, yr)
 % Overlay a solid RGB color wherever mask==true, with transparency alpha.
+% xr/yr are optional XData/YData so the overlay can sit on a cropped view.
+%
+% MEMORY: the colour plane is uint8 rather than double. It only ever holds
+% one constant colour, but as a double HxWx3 it cost ~88 MB per call at
+% 1920x1920 -- and this is called several times per cycle.
 mask = logical(mask);
 H = size(mask,1); W = size(mask,2);
 
-rgbImg = zeros(H,W,3);
-rgbImg(:,:,1) = rgb(1);
-rgbImg(:,:,2) = rgb(2);
-rgbImg(:,:,3) = rgb(3);
+rgb8   = uint8(round(255 * rgb(:)));
+rgbImg = repmat(reshape(rgb8, 1, 1, 3), H, W);
 
-h = image(rgbImg);
+if nargin >= 5
+    h = image(xr, yr, rgbImg);
+else
+    h = image(rgbImg);
+end
 set(h, 'AlphaData', alpha * double(mask));
 end
 
@@ -2191,35 +2081,67 @@ end
 %% ---- full-resolution connected components (cell of linear-index lists) ----
 function kd_composite(base_img, Sf, maskF, y2bMask, xyAll, dot_cmap, cmap, P, show_y2b, win)
 % Renders the standard kick-drift composite into the CURRENT axes, in the
-% same layer order as figure 4000+it:
+% same layer order as the full-field figure:
 %   warped image -> translucent S-field -> S=S_THR contour -> transition
 %   overlay -> banded dots.
-% win = []              renders the S_THR contour over the whole field
-% win = [r0 r1 c0 c1]   restricts the contour to that window.  The raster
-%   layers are cheap to draw in full and the caller clips them with
-%   xlim/ylim, but contour() over the full field is the expensive part, so
-%   for insets we only trace it inside the visible window.
-imshow(base_img, []);
+% win = []              renders the whole field
+% win = [r0 r1 c0 c1]   renders ONLY that window.
+%
+% MEMORY: insets used to draw the full field and then clip with xlim/ylim,
+% so one zoom figure held four copies of the full-resolution RGB image and
+% S-field in graphics objects (~470 MB at 1920x1920). Cropping first makes
+% an inset cost (winsz/H)^2 of that -- a 450px window on a 1920px field is
+% ~5% -- and the visible result is identical. When win is empty we pass the
+% arrays straight through rather than slicing, so the full-field case adds
+% no copy of its own.
+full = isempty(win);
+if full
+    yr = 1:size(Sf,1);
+    xr = 1:size(Sf,2);
+    imgL = base_img;   Ssub = Sf;   mL = maskF;
+else
+    yr = win(1):win(2);
+    xr = win(3):win(4);
+    imgL = base_img(yr, xr, :);   Ssub = Sf(yr, xr);   mL = maskF(yr, xr);
+end
+
+image(xr, yr, imgL);          % RGB in [0,1]; no display-range scaling needed
 axis image off;
 hold on;
 
-hS = imagesc(Sf);
-set(hS, 'AlphaData', P.FIELD_ALPHA * maskF);
+hS = imagesc(xr, yr, Ssub);
+set(hS, 'AlphaData', P.FIELD_ALPHA * mL);
 colormap(gca, cmap);
 apply_log_S_cmap(gca, P.S_CLIP_MAX);
 
-if isempty(win)
-    contour(Sf, [P.S_THR P.S_THR], 'w', 'LineWidth', 1.1);
-else
-    xr = win(3):win(4);  yr = win(1):win(2);
-    contour(xr, yr, Sf(yr, xr), [P.S_THR P.S_THR], 'w', 'LineWidth', 1.3);
+contour(xr, yr, double(Ssub), [P.S_THR P.S_THR], 'w', 'LineWidth', 1.1);
+
+if show_y2b
+    if full
+        y2bSub = y2bMask;
+    else
+        y2bSub = y2bMask(yr, xr);
+    end
+    if any(y2bSub(:))
+        overlay_mask_rgb(y2bSub, [1 0 1], min(0.60, P.TRANS_ALPHA + 0.10), xr, yr);
+    end
 end
 
-if show_y2b && any(y2bMask(:))
-    overlay_mask_rgb(y2bMask, [1 0 1], min(0.60, P.TRANS_ALPHA + 0.10));
+% keep only the dots inside the window -- plotting all of them and relying
+% on clipping still builds the full scatter object
+if ~isempty(xyAll)
+    if full
+        xyW = xyAll;
+    else
+        inWin = xyAll(:,1) >= xr(1) & xyAll(:,1) <= xr(end) & ...
+                xyAll(:,2) >= yr(1) & xyAll(:,2) <= yr(end);
+        xyW = xyAll(inWin, :);
+    end
+    plot_banded_dots(xyW, Sf, dot_cmap);
 end
 
-plot_banded_dots(xyAll, Sf, dot_cmap);
+xlim([xr(1)-0.5, xr(end)+0.5]);
+ylim([yr(1)-0.5, yr(end)+0.5]);
 hold off;
 end
 
@@ -2268,6 +2190,16 @@ for i = 1:numel(placed)
     if ~(w(2) < p(1) || p(2) < w(1) || w(4) < p(3) || p(4) < w(3))
         tf = true;  return;
     end
+end
+end
+
+function n = fignum(base, it, keep_per_cycle)
+% Figure number for a per-cycle figure: one reused window per figure kind,
+% or a separate window per cycle when keep_per_cycle is true.
+if keep_per_cycle
+    n = base + it;
+else
+    n = base;
 end
 end
 
