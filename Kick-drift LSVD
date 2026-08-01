@@ -84,6 +84,9 @@ SHOW_S_FIELD_FIG       = true;
 % overlay S field on the dot figure (semi-transparent)
 OVERLAY_S_FIELD_ON_DOTS = true;
 
+% per-cycle A/B/C zoom-window figure (8500+it) on the S-field
+SHOW_ZOOM_WINDOWS = true;
+
 % -------------------- S-map params --------------------
 SParams.Nwin      = 10;        % target window length; early cycles auto smaller
 SParams.VOTE_T0   = 5;         % number of recent t0 windows to vote over (for dots)
@@ -103,6 +106,10 @@ SParams.FIELD_STEP        = 8;     % coarsening for S-field evaluation (bigger =
 SParams.FIELD_SMOOTH_SIG  = 1.0;   % smoothing strength in "grid cells"
 SParams.FIELD_ALPHA       = 0.28;  % transparency when overlaying on the image
 SParams.S_CLIP_MAX        = 15;    % color scale upper cap for display (logarithmic, so high S compressed)
+
+% Zoom-window (A/B/C) settings
+SParams.ZOOM_WIN_PX       = 300;   % zoom window size in pixels (square)
+SParams.S_CROSS           = 5.26;  % colormap crossover: above this the cmap renders yellow-side (R>B)
 
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
 SParams.SHOW_ONLY_THR_CONTOUR = true;
@@ -656,6 +663,143 @@ for it = 1:cycles
                 end
             end
             hold off; drawnow;
+
+            % ---- ZOOM WINDOWS A / B / C on the S-field ----
+            % A = largest low-stretch blob (max area from the CC analysis)
+            % B = low-stretch blob whose area changed most vs the previous cycle
+            % C = largest component of  S_THR < S < S_CROSS  (classified
+            %     high-stretch, but below the colormap yellow crossover)
+            if SHOW_ZOOM_WINDOWS
+                WINSZ = SParams.ZOOM_WIN_PX;
+                [Hz, Wz] = size(Sfine_final);
+
+                % --- A: largest low-stretch blob ---
+                idxA = []; sortZ_idx = []; areasZ_sorted = [];
+                if ~isempty(CC_low_cycle)
+                    areasZ = cellfun(@numel, CC_low_cycle(:));
+                    [areasZ_sorted, sortZ_idx] = sort(areasZ, 'descend');
+                    idxA = CC_low_cycle{sortZ_idx(1)};
+                end
+
+                % --- B: biggest area change vs previous cycle ---
+                % NOTE: low_blob_rank_area_px_fullres stores areas BY RANK, not
+                % by blob identity -- blobs are not tracked across cycles. So
+                % this finds the RANK whose area moved most, then takes that
+                % rank's blob in the current cycle.
+                idxB = []; kB = NaN; dB = NaN;
+                if ~isempty(sortZ_idx) && it > 1
+                    cur_r = low_blob_rank_area_px_fullres(it,   :);
+                    prv_r = low_blob_rank_area_px_fullres(it-1, :);
+                    dR    = abs(cur_r - prv_r);
+                    if any(isfinite(dR))
+                        [~, kB] = max(dR);            % max ignores NaN
+                        kB = min(kB, numel(sortZ_idx));
+                        dB = cur_r(kB) - prv_r(kB);   % signed change
+                        idxB = CC_low_cycle{sortZ_idx(kB)};
+                    end
+                end
+                if isempty(idxB) && numel(sortZ_idx) >= 2
+                    kB = 2;  idxB = CC_low_cycle{sortZ_idx(2)};   % fallback: 2nd largest
+                elseif isempty(idxB) && ~isempty(sortZ_idx)
+                    kB = 1;  idxB = CC_low_cycle{sortZ_idx(1)};
+                end
+
+                % --- C: largest mid-stretch component (S_THR < S < S_CROSS) ---
+                midMask = maskFine_final & isfinite(Sfine_final) & ...
+                          (Sfine_final >  SParams.S_THR) & ...
+                          (Sfine_final <  SParams.S_CROSS);
+                CC_mid = get_CC_full(midMask, SParams.BLOB_CONN);
+                idxC = []; areaC = 0;
+                if ~isempty(CC_mid)
+                    [areaC, iC] = max(cellfun(@numel, CC_mid(:)));
+                    idxC = CC_mid{iC};
+                end
+
+                zIdx = {idxA, idxB, idxC};
+                zLab = {'A','B','C'};
+                zCol = {[1 0 1], [0 1 1], [1 0.35 0.05]};
+                zWin = cell(3,1);
+                for q = 1:3
+                    if ~isempty(zIdx{q})
+                        zWin{q} = zoom_window_from_idx(zIdx{q}, Hz, Wz, WINSZ);
+                    end
+                end
+
+                zTitle = { ...
+                    sprintf('A: largest low-stretch blob  (%d px)', numel(idxA)), ...
+                    '', ...
+                    sprintf('C: largest %.1f<S<%.2f component  (%d px)', ...
+                            SParams.S_THR, SParams.S_CROSS, areaC) };
+                if isempty(idxB)
+                    zTitle{2} = 'B: n/a';
+                elseif isfinite(dB)
+                    zTitle{2} = sprintf('B: biggest \\DeltaArea (rank #%d)  %d px  (\\Delta=%+d)', ...
+                                        kB, numel(idxB), round(dB));
+                else
+                    zTitle{2} = sprintf('B: rank #%d  %d px  (no prev cycle)', kB, numel(idxB));
+                end
+
+                figZ = figure(8500 + it); clf;
+                set(figZ,'Color','w','Position',[60 40 1500 1050], ...
+                    'Name', sprintf('Cycle %d: S-field zoom windows A/B/C', it));
+
+                % ---- main panel: full field + labelled rectangles ----
+                axMain = subplot(2,3,[1 2 3]);
+                hZ = imagesc(Sfine_final);
+                set(hZ,'AlphaData', double(maskFine_final));
+                axis image off; hold on;
+                colormap(axMain, cmap_blue_yellow);
+                apply_log_S_cmap(axMain, SParams.S_CLIP_MAX);
+                climZ = caxis(axMain);           % reused verbatim by every inset
+                cbZ = colorbar(axMain);
+                cbZ.Label.String = 'S = \sigma_{max}(M)   (log scale)';
+                contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.0);
+
+                for q = 1:3
+                    if isempty(zWin{q}), continue; end
+                    r0 = zWin{q}(1); r1 = zWin{q}(2);
+                    c0 = zWin{q}(3); c1 = zWin{q}(4);
+                    rectangle('Position', [c0-0.5, r0-0.5, c1-c0+1, r1-r0+1], ...
+                              'EdgeColor', zCol{q}, 'LineWidth', 2.5);
+                    text(c0+6, r0+18, zLab{q}, 'Color', zCol{q}, ...
+                         'FontSize', 18, 'FontWeight','bold', ...
+                         'BackgroundColor',[0 0 0 0.45]);
+                end
+                hold off;
+                title(sprintf(['cycle %d: S at CURRENT locations + zoom windows  |  ' ...
+                               'S_{THR}=%.1f  |  Nwin=%d  |  windows %dx%d px'], ...
+                      it, SParams.S_THR, Nw, WINSZ, WINSZ));
+
+                % ---- insets: identical colormap + caxis, no per-axes rescale ----
+                for q = 1:3
+                    axI = subplot(2,3,3+q);
+                    if isempty(zWin{q})
+                        axis(axI,'off');
+                        title(axI, sprintf('%s: n/a', zLab{q}));
+                        continue;
+                    end
+                    r0 = zWin{q}(1); r1 = zWin{q}(2);
+                    c0 = zWin{q}(3); c1 = zWin{q}(4);
+                    xr = c0:c1;  yr = r0:r1;
+                    Ssub = Sfine_final(yr, xr);
+                    Msub = maskFine_final(yr, xr);
+
+                    hI = imagesc(xr, yr, Ssub);       % keeps original coords
+                    set(hI,'AlphaData', double(Msub));
+                    axis image; hold on;
+                    colormap(axI, cmap_blue_yellow);
+                    caxis(axI, climZ);                % SAME caxis as main panel
+                    set(axI, 'ColorScale', 'log');    % SAME scaling as main panel
+                    contour(xr, yr, Ssub, [SParams.S_THR SParams.S_THR], ...
+                            'w', 'LineWidth', 1.3);
+                    hold off;
+                    % colored frame linking the inset to its rectangle
+                    set(axI, 'XTick', [], 'YTick', [], 'Box', 'on', ...
+                             'XColor', zCol{q}, 'YColor', zCol{q}, 'LineWidth', 2.5);
+                    title(axI, zTitle{q}, 'Color', zCol{q}*0.75, 'FontSize', 9);
+                end
+                drawnow;
+            end
 
             % ---- PER-CYCLE ROTATION + TRACE + CLASSIFICATION FIGURE ----
             % 4 panels at FINAL (current) locations:
@@ -2010,6 +2154,22 @@ function [Sfine, maskFine] = compute_s1_field(dp_x_hist, row0, Tau, H, W, t0, Nw
 end
 
 %% ---- full-resolution connected components (cell of linear-index lists) ----
+function win = zoom_window_from_idx(idx_lin, H, W, winsz)
+% Square window of side `winsz` centred on the centroid of the pixel set
+% idx_lin, clamped to the image bounds. Clamping SHIFTS the window rather
+% than shrinking it, so all three windows stay the same size (and therefore
+% the same scale) unless the image itself is smaller than winsz.
+% Returns [r0 r1 c0 c1] (inclusive, 1-based).
+[ry, rx] = ind2sub([H W], double(idx_lin));   % bfs_CC returns uint32
+cy = round(mean(ry));  cx = round(mean(rx));
+
+hh = min(winsz, H);    ww = min(winsz, W);
+r0 = cy - floor(hh/2); r0 = max(1, min(r0, H - hh + 1));
+c0 = cx - floor(ww/2); c0 = max(1, min(c0, W - ww + 1));
+
+win = [r0, r0 + hh - 1, c0, c0 + ww - 1];
+end
+
 function CC = get_CC_full(BW, conn)
     BW = logical(BW);
     if exist('bwconncomp','file') == 2
