@@ -871,58 +871,80 @@ for it = 1:cycles
             WINSZ = SParams.ZOOM_WIN_PX;
             [Hz, Wz] = size(Sfine_final);
 
-            % --- A: largest low-stretch blob ---
-            idxA = []; sortZ_idx = [];
+            % Windows are placed in order A -> B -> C, and each one must land
+            % clear of the ones already placed. Zooming twice into the same
+            % ground wastes a panel, so when a candidate would overlap we try
+            % the next candidate, and failing that re-centre the window
+            % elsewhere inside the same component (see place_window_clear).
+            placedW = {};
+
+            % --- A: largest low-stretch blob (placed first, gets priority) ---
+            idxA = []; sortZ_idx = []; winA = [];
             if ~isempty(CC_low_cycle)
                 areasZ = cellfun(@numel, CC_low_cycle(:));
                 [~, sortZ_idx] = sort(areasZ, 'descend');
                 idxA = CC_low_cycle{sortZ_idx(1)};
+                winA = zoom_window_from_idx(idxA, Hz, Wz, WINSZ);
+                placedW{end+1} = winA;
             end
 
-            % --- B: biggest area change vs previous cycle ---
+            % --- B: biggest area change vs previous cycle, clear of A ---
             % low_blob_rank_area_px_fullres stores areas BY RANK, not by blob
             % identity (blobs are not tracked across cycles), so this is the
             % RANK whose area moved most, then that rank's blob this cycle.
             % Rank 1 is excluded: it IS window A, and being the largest blob it
-            % almost always has the largest absolute change, which would
-            % collapse B onto A and hide A's rectangle underneath B's.
-            idxB = []; kB = NaN; dB = NaN;
+            % almost always has the largest absolute change. Remaining ranks
+            % are tried in order of decreasing |change| until one lands clear.
+            idxB = []; kB = NaN; dB = NaN; winB = [];
             if numel(sortZ_idx) >= 2 && it > 1
                 cur_r = low_blob_rank_area_px_fullres(it,   :);
                 prv_r = low_blob_rank_area_px_fullres(it-1, :);
                 dR    = abs(cur_r - prv_r);
                 dR(1) = NaN;                                         % exclude rank 1 (= A)
                 dR(min(numel(dR), numel(sortZ_idx))+1 : end) = NaN;  % ranks with no blob
-                if any(isfinite(dR))
-                    [~, kB] = max(dR);                % max ignores NaN
-                    dB = cur_r(kB) - prv_r(kB);       % signed change
-                    idxB = CC_low_cycle{sortZ_idx(kB)};
+                dRs = dR;  dRs(~isfinite(dRs)) = -Inf;
+                [dvals, rankOrder] = sort(dRs, 'descend');
+                for t = 1:numel(rankOrder)
+                    if ~isfinite(dvals(t)), break; end
+                    kc   = rankOrder(t);
+                    cand = CC_low_cycle{sortZ_idx(kc)};
+                    [w, okw] = place_window_clear(cand, Hz, Wz, WINSZ, placedW);
+                    if okw || isempty(winB)      % first candidate kept as fallback
+                        kB = kc;  dB = cur_r(kc) - prv_r(kc);
+                        idxB = cand;  winB = w;
+                    end
+                    if okw, break; end
                 end
             end
             if isempty(idxB) && numel(sortZ_idx) >= 2
                 kB = 2;  idxB = CC_low_cycle{sortZ_idx(2)};   % fallback: 2nd largest
+                winB = place_window_clear(idxB, Hz, Wz, WINSZ, placedW);
             end
+            if ~isempty(winB), placedW{end+1} = winB; end
 
-            % --- C: largest mid-stretch component (S_THR < S < S_CROSS) ---
+            % --- C: largest mid-stretch component, clear of A and B ---
             midMask = maskFine_final & isfinite(Sfine_final) & ...
                       (Sfine_final >  SParams.S_THR) & ...
                       (Sfine_final <  SParams.S_CROSS);
             CC_mid = get_CC_full(midMask, SParams.BLOB_CONN);
-            idxC = []; areaC = 0;
+            idxC = []; areaC = 0; winC = [];
             if ~isempty(CC_mid)
-                [areaC, iC] = max(cellfun(@numel, CC_mid(:)));
-                idxC = CC_mid{iC};
+                areasMid = cellfun(@numel, CC_mid(:));
+                [areasMidS, midOrder] = sort(areasMid, 'descend');
+                for t = 1:numel(midOrder)
+                    cand = CC_mid{midOrder(t)};
+                    [w, okw] = place_window_clear(cand, Hz, Wz, WINSZ, placedW);
+                    if okw || isempty(winC)      % largest kept as fallback
+                        idxC = cand;  areaC = areasMidS(t);  winC = w;
+                    end
+                    if okw, break; end
+                end
             end
 
             zIdx = {idxA, idxB, idxC};
+            zWin = {winA, winB, winC};
             zLab = {'A','B','C'};
             zCol = {[1 0 1], [0 1 1], [1 0.35 0.05]};
-            zWin = cell(3,1);
-            for q = 1:3
-                if ~isempty(zIdx{q})
-                    zWin{q} = zoom_window_from_idx(zIdx{q}, Hz, Wz, WINSZ);
-                end
-            end
 
             zTitle = { ...
                 sprintf('A: largest low-stretch blob  (%d px)', numel(idxA)), ...
@@ -991,10 +1013,19 @@ for it = 1:cycles
                 % coloured frame linking the inset back to its rectangle
                 set(axI, 'Visible', 'on', 'XTick', [], 'YTick', [], 'Box', 'on', ...
                          'XColor', zCol{q}, 'YColor', zCol{q}, 'LineWidth', 2.5);
+
+                % Keep the hover toolbar ENABLED so each inset can be zoomed
+                % further by hand. It sits at the top-right, so the title is
+                % left-aligned to stay clear of it instead of being hidden.
+                thI = title(axI, zTitle{q}, 'Color', zCol{q}*0.75, 'FontSize', 9);
+                set(thI, 'HorizontalAlignment', 'left', 'Units', 'normalized');
+                thI.Position(1) = 0;
                 if isprop(axI, 'Toolbar') && ~isempty(axI.Toolbar)
-                    axI.Toolbar.Visible = 'off';
+                    axI.Toolbar.Visible = 'on';
+                    try  %#ok<TRYNC>
+                        axtoolbar(axI, {'zoomin','zoomout','pan','restoreview'});
+                    end
                 end
-                title(axI, zTitle{q}, 'Color', zCol{q}*0.75, 'FontSize', 9);
             end
             drawnow;
         end
@@ -2190,6 +2221,54 @@ end
 
 plot_banded_dots(xyAll, Sf, dot_cmap);
 hold off;
+end
+
+function [win, ok] = place_window_clear(idx_lin, H, W, winsz, placed)
+% Window for the pixel set idx_lin that avoids every window in `placed`
+% (each a [r0 r1 c0 c1]).  Tries the centroid first; if that overlaps, it
+% re-centres on the member pixel whose window is clear AND which sits
+% farthest from the already-placed window centres -- so a big sprawling
+% component still gets a useful window instead of being skipped.
+% ok = false means no clear placement was found; `win` is then the centroid
+% window and the caller may prefer a different candidate.
+win = zoom_window_from_idx(idx_lin, H, W, winsz);
+ok  = ~any_window_overlap(win, placed);
+if ok || isempty(placed), return; end
+
+[ry, rx] = ind2sub([H W], double(idx_lin));
+
+% subsample so huge components stay cheap to scan
+n = numel(ry);
+stride = max(1, floor(n / 2000));
+ry = ry(1:stride:end);  rx = rx(1:stride:end);
+
+% centres of the already-placed windows
+pc = zeros(numel(placed), 2);
+for i = 1:numel(placed)
+    pc(i,:) = [mean(placed{i}(1:2)), mean(placed{i}(3:4))];
+end
+
+best = -Inf;  bestwin = win;  found = false;
+for i = 1:numel(ry)
+    w = zoom_window_from_idx(sub2ind([H W], ry(i), rx(i)), H, W, winsz);
+    if any_window_overlap(w, placed), continue; end
+    d = min(hypot(ry(i) - pc(:,1), rx(i) - pc(:,2)));
+    if d > best
+        best = d;  bestwin = w;  found = true;
+    end
+end
+win = bestwin;  ok = found;
+end
+
+function tf = any_window_overlap(w, placed)
+% True if window w = [r0 r1 c0 c1] intersects any window in `placed`.
+tf = false;
+for i = 1:numel(placed)
+    p = placed{i};
+    if ~(w(2) < p(1) || p(2) < w(1) || w(4) < p(3) || p(4) < w(3))
+        tf = true;  return;
+    end
+end
 end
 
 function win = zoom_window_from_idx(idx_lin, H, W, winsz)
