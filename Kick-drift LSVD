@@ -1385,57 +1385,6 @@ if nF > 0
 end
 hold off; drawnow;
 
-%% -- Fig 7002: Ranked bar chart of blob areas + cumulative line --
-figure(7002); clf;
-set(gcf,'Color','w','Position',[120 80 800 450], ...
-    'Name','Final blob areas - ranked bar chart');
-bar(1:nF, blob_area, 'FaceColor',[0.2 0.5 0.9]);
-hold on;
-plot(1:nF, cumsum(blob_area), 'r-o','LineWidth',1.5,'MarkerSize',5);
-grid on;
-xlabel('blob rank (1 = largest)');
-ylabel('area  (full-resolution pixels)');
-title(sprintf('Low-stretch blob areas after %d cycles  (s_1 \\leq %.2f)', ...
-              cycles, SParams.S_THR));
-legend('individual blob area','cumulative area','Location','northwest');
-xticks(1:nF);
-
-%% -- Fig 7003: Compactness vs equivalent radius --
-figure(7003); clf;
-set(gcf,'Color','w','Position',[140 80 700 500], ...
-    'Name','Final blobs: compactness vs equivalent radius');
-valid_c = isfinite(blob_compact);
-if any(valid_c)
-    scatter(blob_r_eq(valid_c), blob_compact(valid_c), 80, ...
-            blob_area(valid_c), 'filled');
-    colorbar; colormap(gca, cmap_blue_yellow);
-end
-xlabel('equivalent radius  r_{eq} = \surd(A/\pi)  [pixels]');
-ylabel('compactness  C = 4\piA/P^2  (C=1 for circle)');
-title('Blob shape: compactness vs size  (colour = area)');
-grid on;
-for k = 1:nF
-    if isfinite(blob_compact(k))
-        text(blob_r_eq(k)+0.3, blob_compact(k), sprintf('#%d',k), ...
-             'FontSize',8,'Color',[0.2 0.2 0.2]);
-    end
-end
-
-%% -- Fig 7004: Cumulative low-stretch area vs blob rank --
-figure(7004); clf;
-set(gcf,'Color','w','Position',[160 80 700 450], ...
-    'Name','Cumulative low-stretch area vs blob rank');
-cum_area      = cumsum(blob_area);
-area_frac_vec = cum_area / max(1, tot_valid);
-yyaxis left;
-plot(1:nF, cum_area, 'b-o','LineWidth',1.6,'MarkerSize',5);
-ylabel('cumulative area  (pixels)');
-yyaxis right;
-plot(1:nF, area_frac_vec*100, 'r--^','LineWidth',1.6,'MarkerSize',5);
-ylabel('cumulative fraction of valid field  (%)');
-xlabel('blob rank (1 = largest)');
-title('How much of the low-stretch region is in the top-N blobs?');
-grid on; xticks(1:nF);
 
 fprintf('All figures generated.  blob_summary.txt written.\n');
 
