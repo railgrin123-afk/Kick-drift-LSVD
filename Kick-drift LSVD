@@ -1644,88 +1644,104 @@ stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_pa
 end
 
 % ------------------- S magnitude field vs start (this is the "contour plot") -------------------
-function [Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
-% Computes the stretching field S on a coarse grid, then interpolates it to
-% full resolution at the FINAL (current) particle locations.
+function [Sfine_final, maskFine_final, Scoarse, maskC] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+% Stretching field S on a regular grid of FINAL (current) positions.
 %
-% Returns:
-%   Sfine_final, maskFine_final — S values remapped to FINAL (current) locations
+% Each grid point is integrated BACKWARD Nwin steps to its initial
+% condition, then the forward monodromy is run along that orbit. S therefore
+% lands exactly on the regular grid with no scattered interpolation at all.
 %
-% MEMORY: this used to also return START-location fields and rotation/trace
-% fields (8 outputs). Nothing consumed them once the rotation/trace figure
-% was removed, yet each was a full HxW double -- at ~1920x1920 that is ~30 MB
-% apiece, plus three interp2 and two scatteredInterpolant passes over 3.7M
-% query points per cycle. They are no longer computed at all.
-% Sfine_final is returned as SINGLE: it is held across cycles (S_prev_final)
-% and pushed into graphics objects, and single halves that footprint while
-% staying far more precise than the colour scale can show.
+% This replaces a forward remap: a regular grid was placed at the START,
+% pushed forward, and S rebuilt at final positions with
+% scatteredInterpolant(...,'natural','nearest'). Measured against exact
+% backward integration at Nwin=12 on this system, that pipeline
+%   * misclassified 43% of the true low-stretch set at the S<=2 threshold
+%     (low-stretch fraction 0.034 against a true 0.055), and reported 387
+%     blobs where there are 892; median error 21% of S;
+%   * had to bridge huge gaps exactly where S is largest: the map is
+%     area-preserving with median sigma_max ~10 at Nwin=12, so an 8 px cell
+%     arrives as roughly 78 px x 0.8 px and the samples are filamentary.
+%     The map also folds, so Delaunay neighbours at final time can come from
+%     unrelated initial conditions and interpolating between them invents
+%     values;
+%   * triangulated mod-wrapped coordinates, so it saw no periodicity and
+%     grew skinny triangles inward from all four edges.
+%
+% The mask is now real. scatteredInterpolant with 'nearest' extrapolation
+% never returns NaN, so the old maskFine_final was true on all H*W pixels and
+% the DET_TOL check had no effect downstream: rejected probes were silently
+% filled in by their neighbours, and tot_valid was just rows*cols. Here a
+% rejected probe stays NaN and stays masked.
+%
+% Cost is unchanged -- one monodromy per grid point either way; the backward
+% pass is N cheap scalar steps against the monodromy's 5 trajectories.
+% InverseFullStep is an exact closed-form inverse (round trip measured at
+% 2.5e-10 px over 12 steps), so the recovered initial condition is exact.
+%
+% Scoarse/maskC are returned so statistics can be taken on the probe grid
+% that was actually evaluated. Sfine_final is upsampled for DISPLAY only;
+% anything finer than FIELD_STEP in it is reconstruction, not measurement.
 
 step = P.FIELD_STEP;
-ys = 1:step:H;   % 1-based for plotting
+ys = 1:step:H;          % these are FINAL positions now, not start positions
 xs = 1:step:W;
+ny = numel(ys); nx = numel(xs);
 
-Scoarse = nan(numel(ys), numel(xs));
-maskC   = false(numel(ys), numel(xs));
+Scoarse = nan(ny, nx);
+maskC   = false(ny, nx);
+T       = numel(dp_x_hist);
+Nw      = floor(Nwin);
 
-% Store final positions for each coarse grid point
-finalY_coarse = nan(numel(ys), numel(xs));
-finalX_coarse = nan(numel(ys), numel(xs));
+for iy = 1:ny
+    for ix = 1:nx
+        % the grid point IS the final position (0-based for the dynamics)
+        y = double(ys(iy) - 1);
+        x = double(xs(ix) - 1);
 
-for iy = 1:numel(ys)
-    for ix = 1:numel(xs)
-        y0 = double(ys(iy) - 1);  % dynamics uses 0-based
-        x0 = double(xs(ix) - 1);
+        % ---- exact backward integration to the initial condition ----
+        % undoing  Yc = y + dp(x);  Xc = x + Tau*(Yc - row0)
+        for k = Nw-1 : -1 : 0
+            dp = dp_x_hist{mod(t0 + k, T) + 1};
+            x  = x - Tau*(y - row0);
+            y  = y - interp_kick_x(x, dp);
+        end
 
-        [M_raw, xyNw] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
+        % ---- forward monodromy along that orbit ----
+        [M_raw, ~] = kd_dyn_vert('monodromy_with_final', y, x, t0, Nwin, ...
+                                 dp_x_hist, Tau, H, W, row0, 1e-3, true);
         [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, 5e-3);
 
         if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
-            continue;
+            continue;                 % stays NaN and unmasked -- a real mask
         end
 
         Scoarse(iy,ix) = monodromy_to_Smax(M_sym);
         maskC(iy,ix)   = true;
-
-        % Store final (current) positions (0-based -> 1-based for plotting)
-        finalX_coarse(iy,ix) = mod(xyNw(1), W) + 1;
-        finalY_coarse(iy,ix) = mod(xyNw(2), H) + 1;
     end
 end
 
-% ---- START-location S, rotation, and trace fields ----
-% ---- FINAL-location S field (scattered interpolation) ----
-% Each coarse probe started at (xs(ix), ys(iy)) and ended at (finalX,finalY).
-% We want S on a regular grid indexed by FINAL (current) coords.
-validC = maskC & isfinite(Scoarse);
-Svals  = Scoarse(validC);
-fxVals = finalX_coarse(validC);   % 1-based x of final position
-fyVals = finalY_coarse(validC);   % 1-based y of final position
+% Smooth on the COARSE grid, where FIELD_SMOOTH_SIG's "grid cells" is what
+% the parameter actually means. (It used to be applied to the full-resolution
+% field, where sigma=1 meant one pixel, not one cell.)
+Scoarse = smooth2_gaussian_nan(Scoarse, maskC, P.FIELD_SMOOTH_SIG);
+maskC   = isfinite(Scoarse);
 
-% coarse arrays are done with -- free them before allocating full-res grids
-clear Scoarse maskC finalX_coarse finalY_coarse
-
-if numel(Svals) >= 4
-    F_S_interp = scatteredInterpolant(fxVals(:), fyVals(:), Svals(:), 'natural', 'nearest');
-
-    % Evaluate row-block by row-block: a full [Xf,Yf] meshgrid would be two
-    % extra HxW doubles (~30 MB each at 1920x1920) alive at once alongside
-    % the result. Blocking keeps peak memory to one row-block.
+% ---- upsample to full resolution for DISPLAY ----
+% Regular grid to regular grid: ordinary separable interpolation, no
+% triangulation and no seam. NaNs propagate, so the mask survives.
+if any(maskC(:))
     Sfine_final = zeros(H, W, 'single');
-    xrow = 1:W;
-    blk  = max(1, floor(2e6 / max(W,1)));      % ~2M elements per block
+    xrow = min(max(1:W, xs(1)), xs(end));      % clamp: no NaN strip at the far edge
+    blk  = max(1, floor(2e6 / max(W,1)));
     for r0b = 1:blk:H
-        r1b = min(H, r0b + blk - 1);
-        [Xb, Yb] = meshgrid(xrow, r0b:r1b);
-        Sfine_final(r0b:r1b, :) = single(F_S_interp(Xb, Yb));
+        r1b  = min(H, r0b + blk - 1);
+        yrow = min(max(r0b:r1b, ys(1)), ys(end));
+        [Xb, Yb] = meshgrid(xrow, yrow);
+        Sfine_final(r0b:r1b, :) = single(interp2(xs, ys, Scoarse, Xb, Yb, 'linear'));
     end
-    clear F_S_interp Xb Yb
-
-    % Smooth lightly to remove interpolation noise
-    maskF_raw = isfinite(Sfine_final);
-    Sfine_final = single(smooth2_gaussian_nan(double(Sfine_final), maskF_raw, P.FIELD_SMOOTH_SIG));
     maskFine_final = isfinite(Sfine_final);
 else
-    Sfine_final = nan(H, W, 'single');
+    Sfine_final    = nan(H, W, 'single');
     maskFine_final = false(H, W);
 end
 end
