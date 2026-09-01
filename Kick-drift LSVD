@@ -89,9 +89,6 @@ SHOW_S_FIELD_FIG       = true;
 % overlay S field on the dot figure (semi-transparent)
 OVERLAY_S_FIELD_ON_DOTS = true;
 
-% per-cycle A/B/C zoom-window figure on the kick-drift composite
-SHOW_ZOOM_WINDOWS = true;
-
 % MEMORY: with KEEP_FIGS_PER_CYCLE=false every cycle REUSES one window per
 % figure kind, so the session holds ~6 figures instead of 6*cycles. Each
 % figure retains its image CData (~1920x1920 RGB is tens of MB), so keeping
@@ -118,10 +115,6 @@ SParams.FIELD_STEP        = 8;     % coarsening for S-field evaluation (bigger =
 SParams.FIELD_SMOOTH_SIG  = 1.0;   % smoothing strength in "grid cells"
 SParams.FIELD_ALPHA       = 0.28;  % transparency when overlaying on the image
 SParams.S_CLIP_MAX        = 15;    % color scale upper cap for display (logarithmic, so high S compressed)
-
-% Zoom-window (A/B/C) settings
-SParams.ZOOM_WIN_PX       = 450;   % zoom window size in pixels (square)
-SParams.S_CROSS           = 5.26;  % colormap crossover: above this the cmap renders yellow-side (R>B)
 
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
 SParams.SHOW_ONLY_THR_CONTOUR = true;
@@ -281,7 +274,7 @@ for it = 1:cycles
         stage2_img = warp_image(cur, @ForwardFullStep, struct('dp_x',dp_x,'row0',row0,'Tau',Tau));
     end
 
-    % Save the exact kick-drift background used by kd_composite
+    % Save the exact kick-drift background used by the S-field figures
     frameClipped = min(max(stage2_img,0),1);
 
     cycleData.kickDriftRGB(:,:,:,it) = ...
@@ -890,180 +883,6 @@ for it = 1:cycles
             drawnow;
             save_cycle_figure(figC,    "S_on_kick_drift", it);
         end
-        % ============ ZOOM WINDOWS A/B/C on the kick-drift composite ============
-        % Same rendering as figure 4000+it (warped kick-drift image + translucent
-        % S-field + S=S_THR contour + transition overlay + banded dots), with
-        % three WINSZ x WINSZ windows chosen from the connected-component
-        % analysis:
-        %   A = largest low-stretch blob
-        %   B = low-stretch blob whose area changed most vs the previous cycle
-        %   C = largest component of  S_THR < S < S_CROSS  (high-stretch but
-        %       below the colormap yellow crossover)
-        if SHOW_ZOOM_WINDOWS && ~isempty(Sfine_final) && exist('CC_low_cycle','var')
-            WINSZ = SParams.ZOOM_WIN_PX;
-            [Hz, Wz] = size(Sfine_final);
-
-            % Windows are placed in order A -> B -> C, and each one must land
-            % clear of the ones already placed. Zooming twice into the same
-            % ground wastes a panel, so when a candidate would overlap we try
-            % the next candidate, and failing that re-centre the window
-            % elsewhere inside the same component (see place_window_clear).
-            placedW = {};
-
-            % --- A: largest low-stretch blob (placed first, gets priority) ---
-            idxA = []; sortZ_idx = []; winA = [];
-            if ~isempty(CC_low_cycle)
-                areasZ = cellfun(@numel, CC_low_cycle(:));
-                [~, sortZ_idx] = sort(areasZ, 'descend');
-                idxA = CC_low_cycle{sortZ_idx(1)};
-                winA = zoom_window_from_idx(idxA, Hz, Wz, WINSZ);
-                placedW{end+1} = winA;
-            end
-
-            % --- B: biggest area change vs previous cycle, clear of A ---
-            % low_blob_rank_area_px_fullres stores areas BY RANK, not by blob
-            % identity (blobs are not tracked across cycles), so this is the
-            % RANK whose area moved most, then that rank's blob this cycle.
-            % Rank 1 is excluded: it IS window A, and being the largest blob it
-            % almost always has the largest absolute change. Remaining ranks
-            % are tried in order of decreasing |change| until one lands clear.
-            idxB = []; kB = NaN; dB = NaN; winB = [];
-            if numel(sortZ_idx) >= 2 && it > 1
-                cur_r = low_blob_rank_area_px_fullres(it,   :);
-                prv_r = low_blob_rank_area_px_fullres(it-1, :);
-                dR    = abs(cur_r - prv_r);
-                dR(1) = NaN;                                         % exclude rank 1 (= A)
-                dR(min(numel(dR), numel(sortZ_idx))+1 : end) = NaN;  % ranks with no blob
-                dRs = dR;  dRs(~isfinite(dRs)) = -Inf;
-                [dvals, rankOrder] = sort(dRs, 'descend');
-                for t = 1:numel(rankOrder)
-                    if ~isfinite(dvals(t)), break; end
-                    kc   = rankOrder(t);
-                    cand = CC_low_cycle{sortZ_idx(kc)};
-                    [w, okw] = place_window_clear(cand, Hz, Wz, WINSZ, placedW);
-                    if okw || isempty(winB)      % first candidate kept as fallback
-                        kB = kc;  dB = cur_r(kc) - prv_r(kc);
-                        idxB = cand;  winB = w;
-                    end
-                    if okw, break; end
-                end
-            end
-            if isempty(idxB) && numel(sortZ_idx) >= 2
-                kB = 2;  idxB = CC_low_cycle{sortZ_idx(2)};   % fallback: 2nd largest
-                winB = place_window_clear(idxB, Hz, Wz, WINSZ, placedW);
-            end
-            if ~isempty(winB), placedW{end+1} = winB; end
-
-            % --- C: largest mid-stretch component, clear of A and B ---
-            midMask = maskFine_final & isfinite(Sfine_final) & ...
-                      (Sfine_final >  SParams.S_THR) & ...
-                      (Sfine_final <  SParams.S_CROSS);
-            CC_mid = get_CC_full(midMask, SParams.BLOB_CONN);
-            idxC = []; areaC = 0; winC = [];
-            if ~isempty(CC_mid)
-                areasMid = cellfun(@numel, CC_mid(:));
-                [areasMidS, midOrder] = sort(areasMid, 'descend');
-                for t = 1:numel(midOrder)
-                    cand = CC_mid{midOrder(t)};
-                    [w, okw] = place_window_clear(cand, Hz, Wz, WINSZ, placedW);
-                    if okw || isempty(winC)      % largest kept as fallback
-                        idxC = cand;  areaC = areasMidS(t);  winC = w;
-                    end
-                    if okw, break; end
-                end
-            end
-            % CC_mid can hold millions of pixel indices across thousands of
-            % components; only idxC is needed from here on.
-            clear CC_mid midMask areasMid
-
-            zIdx = {idxA, idxB, idxC};
-            zWin = {winA, winB, winC};
-            zLab = {'A','B','C'};
-            zCol = {[1 0 1], [0 1 1], [1 0.35 0.05]};
-
-            zTitle = { ...
-                sprintf('A: largest low-stretch blob  (%d px)', numel(idxA)), ...
-                '', ...
-                sprintf('C: largest %.1f<S<%.2f component  (%d px)', ...
-                        SParams.S_THR, SParams.S_CROSS, areaC) };
-            if isempty(idxB)
-                zTitle{2} = 'B: n/a';
-            elseif isfinite(dB)
-                zTitle{2} = sprintf('B: biggest \\DeltaArea (rank #%d)  %d px  (\\Delta=%+d)', ...
-                                    kB, numel(idxB), round(dB));
-            else
-                zTitle{2} = sprintf('B: rank #%d  %d px  (no prev cycle)', kB, numel(idxB));
-            end
-
-            figZ = figure(fignum(8500, it, KEEP_FIGS_PER_CYCLE)); clf;
-            set(figZ,'Color','w','Position',[60 40 1500 1050], ...
-                'Name', sprintf('Cycle %d: kick-drift + S-field, zoom windows A/B/C', it));
-
-            % ---- main panel: full kick-drift composite + labelled rectangles ----
-            subplot(2,3,[1 2 3]);
-            kd_composite(stage2_img, Sfine_final, maskFine_final, y2bMask_final, ...
-                         [xyLow; xyHigh], dot_cmap, cmap_blue_yellow, SParams, ...
-                         SHOW_Y2B_ORANGE, []);
-            axMain = gca;                    % re-acquire: imshow may reuse/replace axes
-            climZ  = caxis(axMain);          % reused verbatim by every inset
-            colorbar(axMain);
-
-            hold on;
-            % draw C, then B, then A so A lands on top if two windows overlap
-            for q = [3 2 1]
-                if isempty(zWin{q}), continue; end
-                r0 = zWin{q}(1); r1 = zWin{q}(2);
-                c0 = zWin{q}(3); c1 = zWin{q}(4);
-                rectangle('Position', [c0-0.5, r0-0.5, c1-c0+1, r1-r0+1], ...
-                          'EdgeColor', zCol{q}, 'LineWidth', 2.5);
-                text(c0+6, r0+18+22*(q-1), zLab{q}, 'Color', zCol{q}, ...
-                     'FontSize', 18, 'FontWeight','bold', ...
-                     'BackgroundColor',[0 0 0 0.45]);
-            end
-            hold off;
-            title(sprintf(['cycle %d: kick-drift + S at CURRENT locations (S<=%.2f) | ' ...
-                           'Nwin=%d | low=%d, stretched=%d | windows %dx%d px'], ...
-                  it, Pnow.S_THR, Pnow.Nwin, stats.n_low, stats.n_high, WINSZ, WINSZ));
-
-            % ---- insets: identical composite and caxis, just zoomed in ----
-            for q = 1:3
-                axI = subplot(2,3,3+q);
-                if isempty(zWin{q})
-                    axis(axI,'off');
-                    title(axI, sprintf('%s: n/a', zLab{q}));
-                    continue;
-                end
-                r0 = zWin{q}(1); r1 = zWin{q}(2);
-                c0 = zWin{q}(3); c1 = zWin{q}(4);
-
-                kd_composite(stage2_img, Sfine_final, maskFine_final, y2bMask_final, ...
-                             [xyLow; xyHigh], dot_cmap, cmap_blue_yellow, SParams, ...
-                             SHOW_Y2B_ORANGE, [r0 r1 c0 c1]);
-                axI = gca;                       % re-acquire after imshow
-                caxis(axI, climZ);               % SAME caxis as main panel
-                set(axI, 'ColorScale', 'log');   % SAME scaling as main panel
-                % (limits are set by kd_composite, which now crops to the window)
-
-                % coloured frame linking the inset back to its rectangle
-                set(axI, 'Visible', 'on', 'XTick', [], 'YTick', [], 'Box', 'on', ...
-                         'XColor', zCol{q}, 'YColor', zCol{q}, 'LineWidth', 2.5);
-
-                % Keep the hover toolbar ENABLED so each inset can be zoomed
-                % further by hand. It sits at the top-right, so the title is
-                % left-aligned to stay clear of it instead of being hidden.
-                thI = title(axI, zTitle{q}, 'Color', zCol{q}*0.75, 'FontSize', 9);
-                set(thI, 'HorizontalAlignment', 'left', 'Units', 'normalized');
-                thI.Position(1) = 0;
-                if isprop(axI, 'Toolbar') && ~isempty(axI.Toolbar)
-                    axI.Toolbar.Visible = 'on';
-                    try  %#ok<TRYNC>
-                        axtoolbar(axI, {'zoomin','zoomout','pan','restoreview'});
-                    end
-                end
-            end
-            drawnow;
-            save_cycle_figure(figZ,    "zoom_windows", it);
-        end
 
         % store for next cycle comparison
         S_prev_final    = Sfine_final;
@@ -1072,7 +891,7 @@ for it = 1:cycles
         % MEMORY: drop this cycle's heavy temporaries before the next
         % iteration allocates its own. CC_low_cycle in particular holds one
         % index list per low-stretch component at full resolution.
-        clear CC_low_cycle idxA idxB idxC zIdx zWin placedW blueMask yellowMask
+        clear CC_low_cycle blueMask yellowMask
 
     end
 end
@@ -2084,9 +1903,8 @@ for r = 1:H
 end
 end
 
-function h = overlay_mask_rgb(mask, rgb, alpha, xr, yr)
+function h = overlay_mask_rgb(mask, rgb, alpha)
 % Overlay a solid RGB color wherever mask==true, with transparency alpha.
-% xr/yr are optional XData/YData so the overlay can sit on a cropped view.
 %
 % MEMORY: the colour plane is uint8 rather than double. It only ever holds
 % one constant colour, but as a double HxWx3 it cost ~88 MB per call at
@@ -2097,11 +1915,7 @@ H = size(mask,1); W = size(mask,2);
 rgb8   = uint8(round(255 * rgb(:)));
 rgbImg = repmat(reshape(rgb8, 1, 1, 3), H, W);
 
-if nargin >= 5
-    h = image(xr, yr, rgbImg);
-else
-    h = image(rgbImg);
-end
+h = image(rgbImg);
 set(h, 'AlphaData', alpha * double(mask));
 end
 
@@ -2175,121 +1989,6 @@ function [Sfine, maskFine] = compute_s1_field(dp_x_hist, row0, Tau, H, W, t0, Nw
     % REMOVED: Sfine(Sfine > P.S_CLIP_MAX) = P.S_CLIP_MAX;
 end
 
-%% ---- full-resolution connected components (cell of linear-index lists) ----
-function kd_composite(base_img, Sf, maskF, y2bMask, xyAll, dot_cmap, cmap, P, show_y2b, win)
-% Renders the standard kick-drift composite into the CURRENT axes, in the
-% same layer order as the full-field figure:
-%   warped image -> translucent S-field -> S=S_THR contour -> transition
-%   overlay -> banded dots.
-% win = []              renders the whole field
-% win = [r0 r1 c0 c1]   renders ONLY that window.
-%
-% MEMORY: insets used to draw the full field and then clip with xlim/ylim,
-% so one zoom figure held four copies of the full-resolution RGB image and
-% S-field in graphics objects (~470 MB at 1920x1920). Cropping first makes
-% an inset cost (winsz/H)^2 of that -- a 450px window on a 1920px field is
-% ~5% -- and the visible result is identical. When win is empty we pass the
-% arrays straight through rather than slicing, so the full-field case adds
-% no copy of its own.
-full = isempty(win);
-if full
-    yr = 1:size(Sf,1);
-    xr = 1:size(Sf,2);
-    imgL = base_img;   Ssub = Sf;   mL = maskF;
-else
-    yr = win(1):win(2);
-    xr = win(3):win(4);
-    imgL = base_img(yr, xr, :);   Ssub = Sf(yr, xr);   mL = maskF(yr, xr);
-end
-
-image(xr, yr, imgL);          % RGB in [0,1]; no display-range scaling needed
-axis image off;
-hold on;
-
-hS = imagesc(xr, yr, Ssub);
-set(hS, 'AlphaData', P.FIELD_ALPHA * mL);
-colormap(gca, cmap);
-apply_log_S_cmap(gca, P.S_CLIP_MAX);
-
-contour(xr, yr, double(Ssub), [P.S_THR P.S_THR], 'w', 'LineWidth', 1.1);
-
-if show_y2b
-    if full
-        y2bSub = y2bMask;
-    else
-        y2bSub = y2bMask(yr, xr);
-    end
-    if any(y2bSub(:))
-        overlay_mask_rgb(y2bSub, [1 0 1], min(0.60, P.TRANS_ALPHA + 0.10), xr, yr);
-    end
-end
-
-% keep only the dots inside the window -- plotting all of them and relying
-% on clipping still builds the full scatter object
-if ~isempty(xyAll)
-    if full
-        xyW = xyAll;
-    else
-        inWin = xyAll(:,1) >= xr(1) & xyAll(:,1) <= xr(end) & ...
-                xyAll(:,2) >= yr(1) & xyAll(:,2) <= yr(end);
-        xyW = xyAll(inWin, :);
-    end
-    plot_banded_dots(xyW, Sf, dot_cmap);
-end
-
-xlim([xr(1)-0.5, xr(end)+0.5]);
-ylim([yr(1)-0.5, yr(end)+0.5]);
-hold off;
-end
-
-function [win, ok] = place_window_clear(idx_lin, H, W, winsz, placed)
-% Window for the pixel set idx_lin that avoids every window in `placed`
-% (each a [r0 r1 c0 c1]).  Tries the centroid first; if that overlaps, it
-% re-centres on the member pixel whose window is clear AND which sits
-% farthest from the already-placed window centres -- so a big sprawling
-% component still gets a useful window instead of being skipped.
-% ok = false means no clear placement was found; `win` is then the centroid
-% window and the caller may prefer a different candidate.
-win = zoom_window_from_idx(idx_lin, H, W, winsz);
-ok  = ~any_window_overlap(win, placed);
-if ok || isempty(placed), return; end
-
-[ry, rx] = ind2sub([H W], double(idx_lin));
-
-% subsample so huge components stay cheap to scan
-n = numel(ry);
-stride = max(1, floor(n / 2000));
-ry = ry(1:stride:end);  rx = rx(1:stride:end);
-
-% centres of the already-placed windows
-pc = zeros(numel(placed), 2);
-for i = 1:numel(placed)
-    pc(i,:) = [mean(placed{i}(1:2)), mean(placed{i}(3:4))];
-end
-
-best = -Inf;  bestwin = win;  found = false;
-for i = 1:numel(ry)
-    w = zoom_window_from_idx(sub2ind([H W], ry(i), rx(i)), H, W, winsz);
-    if any_window_overlap(w, placed), continue; end
-    d = min(hypot(ry(i) - pc(:,1), rx(i) - pc(:,2)));
-    if d > best
-        best = d;  bestwin = w;  found = true;
-    end
-end
-win = bestwin;  ok = found;
-end
-
-function tf = any_window_overlap(w, placed)
-% True if window w = [r0 r1 c0 c1] intersects any window in `placed`.
-tf = false;
-for i = 1:numel(placed)
-    p = placed{i};
-    if ~(w(2) < p(1) || p(2) < w(1) || w(4) < p(3) || p(4) < w(3))
-        tf = true;  return;
-    end
-end
-end
-
 function n = fignum(base, it, keep_per_cycle)
 % Figure number for a per-cycle figure: one reused window per figure kind,
 % or a separate window per cycle when keep_per_cycle is true.
@@ -2300,22 +1999,7 @@ else
 end
 end
 
-function win = zoom_window_from_idx(idx_lin, H, W, winsz)
-% Square window of side `winsz` centred on the centroid of the pixel set
-% idx_lin, clamped to the image bounds. Clamping SHIFTS the window rather
-% than shrinking it, so all three windows stay the same size (and therefore
-% the same scale) unless the image itself is smaller than winsz.
-% Returns [r0 r1 c0 c1] (inclusive, 1-based).
-[ry, rx] = ind2sub([H W], double(idx_lin));   % bfs_CC returns uint32
-cy = round(mean(ry));  cx = round(mean(rx));
-
-hh = min(winsz, H);    ww = min(winsz, W);
-r0 = cy - floor(hh/2); r0 = max(1, min(r0, H - hh + 1));
-c0 = cx - floor(ww/2); c0 = max(1, min(c0, W - ww + 1));
-
-win = [r0, r0 + hh - 1, c0, c0 + ww - 1];
-end
-
+%% ---- full-resolution connected components (cell of linear-index lists) ----
 function CC = get_CC_full(BW, conn)
     BW = logical(BW);
     if exist('bwconncomp','file') == 2
