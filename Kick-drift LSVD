@@ -1369,8 +1369,13 @@ function u = randpot1d_four(cf)
     phase = zeros(1,n);
     lo = 2:(n/2);
     hi = (n/2+2):n;
-    if ~isempty(lo), phase(lo) = p; end
-    if ~isempty(hi), phase(hi) = fliplr(p); end
+    % Hermitian symmetry: mode k and its conjugate partner n-k must carry
+    % OPPOSITE phases. Using +fliplr(p) here gave them the SAME phase, which
+    % is even symmetry -- every mode collapsed to a zero-offset cosine, so
+    % dp_x came out exactly mirror-symmetric about x=0 and x=n/2 with the
+    % realized correlation C(x-x')+C(x+x') instead of the stationary C(x-x').
+    if ~isempty(lo), phase(lo) =  p; end
+    if ~isempty(hi), phase(hi) = -fliplr(p); end
     cff = cf(:).' .* exp(1i*phase);
     cff(1) = 0;
     u = sqrt(n)*ifft(cff); u = real(u);
