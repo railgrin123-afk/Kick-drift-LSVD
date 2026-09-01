@@ -68,8 +68,48 @@ Tau0   = 0.5;
 Lx=1.0; Lp=1.0;
 TIME_DIR = +1;     % +1 pullback forward-time; -1 visually reverse time
 
+% ---- physical <-> pixel conversion ----
+% The image is a picture of phase space: row y carries momentum p, column x
+% carries position X, with
+%     y = row0 + p*rows/Lp        X = x*Lx/cols
+% Substituting those into the physical map
+%     kick   p' = p + K0*u(X)
+%     drift  X' = X + Tau0*p'
+% gives the pixel map used by ForwardFullStep:
+%     K   = K0*rows/Lp                 (momentum -> rows)
+%     Tau = Tau0*Lp*cols/(Lx*rows)     (momentum -> columns, per drift step)
+%
+% Tau previously read (Tau0*Lx*rows)/(cols*Lp) -- both the Lx/Lp and the
+% rows/cols ratios inverted. Because K*Tau is the ONLY combination the
+% dynamics depends on (put eta = Tau*(y-row0) and the map becomes the
+% standard map  eta' = eta + K*Tau*u(x),  x' = x + eta'), that error made
+% the physics scale as rows^2/(cols*Lp^2) when it must not depend on rows or
+% Lp at all -- those are display and normalisation choices. The corrected
+% form gives K*Tau = K0*Tau0*cols/Lx, with rows and Lp cancelling exactly.
+%
+% At the settings this script ships with (square 1920x1920 image, Lx=Lp=1)
+% both forms evaluate to Tau=0.5, so this changes no existing result; it is
+% a trap that springs the moment the image is non-square or Lx/Lp move off 1.
 K   = K0/Lp * rows;
-Tau = (Tau0*Lx*rows)/(cols*Lp);
+Tau = (Tau0*Lp*cols)/(Lx*rows);
+
+% The dynamics depends on exactly two dimensionless numbers. Neither may
+% contain rows, cols, Lp or the export resolution; if a result moves when
+% those change, something is still mis-converted.
+kappa   = K0*Tau0*cols/Lx;    % = K*Tau, the standard-map parameter
+epsilon = K0*Tau0/(Lx*lc);    % shear injected per kick / drift's own shear
+assert(abs(K*Tau - kappa) < 1e-9*max(1,kappa), ...
+       'K*Tau (%.6g) disagrees with kappa (%.6g): unit conversion is inconsistent.', ...
+       K*Tau, kappa);
+fprintf('Dynamics: kappa = K*Tau = %.4f | epsilon = K0*Tau0/(Lx*lc) = %.4f\n', ...
+        kappa, epsilon);
+% Pure drift alone (u=0) has M_N = [[1, N*Tau],[0,1]] and sigma_max =
+% (b+sqrt(b^2+4))/2 with b = N*Tau, which reaches 2 at b = 1.5 exactly. With
+% Tau=0.5 that is cycle 3, so with S_THR=2 nothing can stay "low-stretch"
+% past cycle 3 unless the kick partially cancels the drift shear -- worth
+% remembering when reading the decay fit, whose window starts there.
+fprintf('Pure-drift sigma_max reaches %.2f at N = %.2f cycles (b = N*Tau = 1.5).\n', ...
+        2.0, 1.5/Tau);
 
 xgrid = linspace(-0.5, 0.5, cols);
 c_x   = exp(-(xgrid.^2)/(lc^2));
@@ -208,6 +248,8 @@ runMetadata.Tau0 = Tau0;
 runMetadata.lc = lc;
 runMetadata.Lx = Lx;
 runMetadata.Lp = Lp;
+runMetadata.kappa   = kappa;      % K*Tau, the standard-map parameter
+runMetadata.epsilon = epsilon;    % the dimensionless control knob
 runMetadata.K = K;
 runMetadata.Tau = Tau;
 runMetadata.TIME_DIR = TIME_DIR;
