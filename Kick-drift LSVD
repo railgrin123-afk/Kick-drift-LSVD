@@ -22,7 +22,12 @@
 %     and optionally overlay only ONE contour: S = 2.
 % ========================================================================
 
-clear; clc; close all; rng(0);
+clear;
+clc;
+close all;
+
+randomSeed = 0;
+rng(randomSeed,'twister');
 
 %% ---------- A) make the initial image (dotted grid + 3 bands) ----------
 n = 40;
@@ -55,7 +60,7 @@ if mod(cols,2), img0 = img0(:,2:end,:); end
 [rows, cols, ~] = size(img0);
 
 % -------------------- dynamics parameters --------------------
-cycles = 10;
+cycles = 12;
 row0   = rows/2;
 lc     = 0.05;
 K0     = 0.025;
@@ -95,7 +100,7 @@ SHOW_ZOOM_WINDOWS = true;
 KEEP_FIGS_PER_CYCLE = false;
 
 % -------------------- S-map params --------------------
-SParams.Nwin      = 10;        % target window length; early cycles auto smaller
+SParams.Nwin      = 12;        % target window length; early cycles auto smaller
 SParams.VOTE_T0   = 5;         % number of recent t0 windows to vote over (for dots)
 SParams.KEEP_FRAC = 0.50;      % fraction of passes that must agree
 SParams.PITCH_YX  = [12 12];   % probe lattice spacing
@@ -191,6 +196,76 @@ low_blob_rank_area_px_fullres = nan(cycles, TOPK_LOW_BLOBS);
 STORE_FULL_SVD_EACH_CYCLE = true;
 svd_start_hist = cell(cycles,1);
 
+cycleData = matfile("full_cycle_data.mat", "Writable", true);
+
+% Preallocate directly on disk
+cycleData.S(rows,cols,cycles) = single(0);
+cycleData.mask(rows,cols,cycles) = false;
+
+%simulation_data
+runMetadata = struct();
+
+% Randomness
+runMetadata.randomSeed = randomSeed;
+runMetadata.rngStateBeforeKicks = rng;
+
+% Physical parameters
+runMetadata.K0 = K0;
+runMetadata.Tau0 = Tau0;
+runMetadata.lc = lc;
+runMetadata.Lx = Lx;
+runMetadata.Lp = Lp;
+runMetadata.K = K;
+runMetadata.Tau = Tau;
+runMetadata.TIME_DIR = TIME_DIR;
+
+% Geometry
+runMetadata.n = n;
+runMetadata.rows = rows;
+runMetadata.cols = cols;
+runMetadata.row0 = row0;
+runMetadata.xgrid = xgrid;
+runMetadata.cycles = cycles;
+
+% Complete S settings
+runMetadata.SParams = SParams;
+
+% Display switches
+runMetadata.SHOW_Y2B_ORANGE = SHOW_Y2B_ORANGE;
+runMetadata.OVERLAY_S_FIELD_ON_DOTS = OVERLAY_S_FIELD_ON_DOTS;
+runMetadata.SHOW_LOW_STRETCH_DOTS = SHOW_LOW_STRETCH_DOTS;
+
+% Software information
+runMetadata.createdAt = datetime('now');
+runMetadata.matlabVersion = version;
+runMetadata.installedProducts = ver;
+runMetadata.codeName = mfilename;
+
+cycleData.metadata = runMetadata;
+cycleData.cmap_blue_yellow = cmap_blue_yellow;
+
+% -------------------- ADDITIONAL PER-CYCLE STORAGE --------------------
+
+% The actual kick-drift background used in the coloured composite.
+% uint8 is sufficient because this is visualization data.
+cycleData.kickDriftRGB(rows,cols,3,cycles) = uint8(0);
+
+% Yellow-to-blue/magenta transition layer
+cycleData.y2bMask(rows,cols,cycles) = false;
+
+% Window information used to calculate S during each cycle
+cycleData.NwinPerCycle(1,cycles) = uint16(0);
+cycleData.t0PerCycle(1,cycles)   = uint16(0);
+
+% Initial, unwarped image used by the visualization
+initialClipped = min(max(img0,0),1);
+cycleData.initialRGB = uint8(round(255*initialClipped));
+
+% These arrays have variable numbers of rows, so keep them as cells during
+% the simulation and write them to the MAT-file after the loop.
+xyLow_history   = cell(cycles,1);
+xyHigh_history  = cell(cycles,1);
+dotStats_history = cell(cycles,1);
 
 for it = 1:cycles
     % ---- new random kick profile ----
@@ -205,6 +280,12 @@ for it = 1:cycles
     else
         stage2_img = warp_image(cur, @ForwardFullStep, struct('dp_x',dp_x,'row0',row0,'Tau',Tau));
     end
+
+    % Save the exact kick-drift background used by kd_composite
+    frameClipped = min(max(stage2_img,0),1);
+
+    cycleData.kickDriftRGB(:,:,:,it) = ...
+        uint8(round(255*frameClipped));
 
     % MEMORY: img_hist used to keep every cycle's full RGB frame. At
     % ~1920x1920x3 doubles that is ~88 MB per cycle and only the COUNT was
@@ -225,6 +306,7 @@ for it = 1:cycles
 
         nexttile; imshow(stage2_img, []); axis image off; title('AFTER DRIFT');
         drawnow;
+        save_cycle_figure(figA,    "before_kick_drift", it);
     end
 
     cur = stage2_img;
@@ -234,10 +316,15 @@ for it = 1:cycles
     Nw   = min(SParams.Nwin, Tcur);
     t0_recent = max(0, Tcur - Nw);
 
+    cycleData.NwinPerCycle(1,it) = uint16(Nw);
+    cycleData.t0PerCycle(1,it)   = uint16(t0_recent);
+
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
         [Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                             t0_recent, Nw, SParams);
+        cycleData.S(:,:,it)    = Sfine_final;
+        cycleData.mask(:,:,it) = maskFine_final;
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
         y2bMask_final = false(rows, cols);
 
@@ -262,8 +349,8 @@ for it = 1:cycles
                 validBothF = valid & mask_prev_final & isfinite(S_prev_final);
 
                 y2bMask_final = validBothF & ...
-                                (S_prev_final >  SParams.S_THR) & ...
-                                (Sfine_final   <= SParams.S_THR);
+                                (S_prev_final >  4.8) & ...
+                                (Sfine_final   <= 4.8);
 
                 y2b_area_px(it) = nnz(y2bMask_final);
 
@@ -278,6 +365,9 @@ for it = 1:cycles
                 y2b_frac(it)    = 0;
             end
         end
+
+        % Save the complete per-pixel transition layer
+        cycleData.y2bMask(:,:,it) = y2bMask_final;
 
         % -------------------- ADD-ON: full-res low-stretch blob areas this cycle --------------------
         % One blob = one connected component of the low-stretch set S <= S_THR.
@@ -433,6 +523,39 @@ for it = 1:cycles
             1.00 0.00 0.00;   % 5: bright red      (2.2<S<2.5)
             0.00 0.70 0.80];  % 6: teal            (2.5<=S<=3.0)
 
+        % The colour definitions are constant, so save them only once.
+        if it == 1
+            visualization = struct();
+
+            visualization.SColorMap = cmap_blue_yellow;
+            visualization.BandColorMap = band_cmap;
+            visualization.DotColorMap = dot_cmap;
+
+            visualization.SColorScale = "log";
+            visualization.SColorLimits = [1 SParams.S_CLIP_MAX];
+            visualization.SAlpha = SParams.FIELD_ALPHA;
+
+            visualization.ContourLevel = SParams.S_THR;
+            visualization.ContourColor = [1 1 1];
+            visualization.ContourLineWidth = 1.1;
+
+            visualization.TransitionColor = [1 0 1];
+            visualization.TransitionAlpha = ...
+                min(0.60,SParams.TRANS_ALPHA + 0.10);
+
+            visualization.DotMarkerSize = 10;
+
+            visualization.BandEdges = [ ...
+                -Inf 1.0 1.3 1.5 1.8 2.0 ...
+                2.2 2.5 2.7 3.0 3.5 4.0 Inf];
+
+            visualization.SHOW_Y2B_ORANGE = SHOW_Y2B_ORANGE;
+            visualization.OVERLAY_S_FIELD_ON_DOTS = ...
+                OVERLAY_S_FIELD_ON_DOTS;
+
+            cycleData.visualization = visualization;
+        end
+
         hIm = imagesc(double(Lband));
         axis image off;
         set(hIm,'AlphaData', 1.0 * (Lband > 0));   % transparent outside any band
@@ -453,6 +576,7 @@ for it = 1:cycles
 
         hold off;
         drawnow;
+        save_cycle_figure(figS,    "banded_S_field", it);
 
         % ---- S-field at CURRENT (FINAL) locations: standalone heatmap ----
         if ~isempty(Sfine_final)
@@ -482,6 +606,7 @@ for it = 1:cycles
 
             hold off;
             drawnow;
+            save_cycle_figure(figSF,   "continuous_S_field", it);
         end
 
         % ---- 3-PANEL HISTOGRAM of S distribution per cycle ----
@@ -618,6 +743,7 @@ for it = 1:cycles
             sgtitle(sprintf('Cycle %d: S-level distributions  (total valid=%d)  log-caxis=[%.2f, %.2f]', ...
                     it, numel(Svals), cax_lo, cax_hi), 'FontWeight','bold');
             drawnow;
+            save_cycle_figure(figH,    "S_histograms", it);
 
             % ---- PER-CYCLE BLOB MAP (mirrors final blob figure 7001) ----
             figBlob = figure(fignum(8000, it, KEEP_FIGS_PER_CYCLE)); clf;
@@ -673,6 +799,7 @@ for it = 1:cycles
                 end
             end
             hold off; drawnow;
+            save_cycle_figure(figBlob, "blob_map", it);
 
         end
     else
@@ -686,6 +813,11 @@ for it = 1:cycles
 
         % dots from your robust voting scheme
         [xyLow, xyHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, Pnow, rows, cols);
+
+        % Save the numerical dot information used by the overlay
+        xyLow_history{it}  = single(xyLow);
+        xyHigh_history{it} = single(xyHigh);
+        dotStats_history{it} = stats;
 
         % ============ FIGURE: CURRENT-location S-field on cycle-0 frame ============
         figB = figure(fignum(3000, it, KEEP_FIGS_PER_CYCLE)); clf;
@@ -720,6 +852,7 @@ for it = 1:cycles
 
         hold off;
         drawnow;
+        save_cycle_figure(figB,    "S_on_initial_frame", it);
 
         % ============ FIGURE: S-field at CURRENT (FINAL) locations on kick-drift map ============
         if ~isempty(Sfine_final)
@@ -755,6 +888,7 @@ for it = 1:cycles
 
             hold off;
             drawnow;
+            save_cycle_figure(figC,    "S_on_kick_drift", it);
         end
         % ============ ZOOM WINDOWS A/B/C on the kick-drift composite ============
         % Same rendering as figure 4000+it (warped kick-drift image + translucent
@@ -928,6 +1062,7 @@ for it = 1:cycles
                 end
             end
             drawnow;
+            save_cycle_figure(figZ,    "zoom_windows", it);
         end
 
         % store for next cycle comparison
@@ -943,6 +1078,19 @@ for it = 1:cycles
 end
 
 final_img = cur;
+% -------------------- SAVE VARIABLE-SIZED RUN DATA --------------------
+
+% Exact random kick profiles used by the dynamics
+cycleData.dp_x_hist = dp_x_hist;
+
+% Dot positions and voting statistics
+cycleData.xyLow_history = xyLow_history;
+cycleData.xyHigh_history = xyHigh_history;
+cycleData.dotStats_history = dotStats_history;
+
+% Save the final kick-drift frame separately for convenient access
+finalClipped = min(max(final_img,0),1);
+cycleData.finalRGB = uint8(round(255*finalClipped));
 fprintf('\nSim done: frames=%d, kicks=%d\n', n_frames, numel(dp_x_hist));
 % -------------------- ADD-ON: save full SVD history --------------------
 if STORE_FULL_SVD_EACH_CYCLE
@@ -2393,4 +2541,15 @@ r2 = linspace(1.00, 0.85, N-half).';
 g2 = linspace(1.00, 0.10, N-half).';
 b2 = linspace(1.00, 0.15, N-half).';
 cmap = [r1 g1 b1; r2 g2 b2];
+end
+
+function save_cycle_figure(fig, plotName, cycle)
+    folder = "saved_cycle_figures";
+
+    if ~isfolder(folder)
+        mkdir(folder)
+    end
+
+    filename = sprintf("%s_cycle_%02d.fig", plotName, cycle);
+    savefig(fig, fullfile(folder, filename));
 end
