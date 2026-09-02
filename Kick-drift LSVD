@@ -137,14 +137,8 @@ KEEP_FIGS_PER_CYCLE = false;
 
 % -------------------- S-map params --------------------
 SParams.Nwin      = 12;        % target window length; early cycles auto smaller
-SParams.VOTE_T0   = 5;         % number of recent t0 windows to vote over (for dots)
-SParams.KEEP_FRAC = 0.50;      % fraction of passes that must agree
 SParams.PITCH_YX  = [12 12];   % probe lattice spacing
 SParams.JITTER_FR = 0.8;       % jitter as fraction of pitch
-% No longer used: it gated the 5-point stencil vote, which has been removed.
-% A probe is now classified by its own S, so the centre is the measurement.
-% Kept so runMetadata.SParams stays comparable with earlier runs.
-SParams.CENTER_MUST_BE_GOOD = true;  %#ok<NASGU> (unused)
 
 SParams.DET_TOL = 5e-3;        % det sanity for FD monodromy
 SParams.S_THR   = 2.0;         % your criterion: S <= 2 is low-stretch
@@ -805,8 +799,8 @@ for it = 1:cycles
             plot_banded_dots([xyLow; xyHigh], [sLow; sHigh], dot_cmap);
 
             title(sprintf(['cycle %d: S-field at CURRENT locations (S<=%.2f) | Nwin=%d | ' ...
-                           'low=%d, stretched=%d, passes=%d'], ...
-                  it, Pnow.S_THR, Pnow.Nwin, stats.n_low, stats.n_high, stats.passes));
+                           'probes: low=%d, stretched=%d of %d'], ...
+                  it, Pnow.S_THR, Pnow.Nwin, stats.n_low, stats.n_high, stats.n_probes));
 
             hold off;
             drawnow;
@@ -1344,124 +1338,84 @@ end
 
 % ------------------- LOW-STRETCH DOTS (your robust voting version) -------------------
 function [xyLow, xyHigh, sLow, sHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, P, H, W)
-% Sparse markers at the FINAL positions of a jittered probe lattice, each
-% carrying the S value measured at that probe.
+% Sparse markers at the final positions of a jittered probe lattice, each
+% carrying the S measured at that probe. One monodromy per probe, one pass,
+% and the probes are emitted as a list rather than rasterised into H x W
+% accumulators.
 %
-% The 5-point spatial stencil is gone. It ran a monodromy at the probe and at
-% +/- pitch/2 in x and y, then required 3 of 5 to agree before keeping the
-% probe. That cost 5 monodromies per probe -- 2.2x the entire S-field
-% computation it was drawn on top of -- and, because the low-stretch set is
-% filamentary at a scale comparable to the +/-6 px offsets, it acted as an
-% undocumented erosion that preferentially deleted thin filaments. One
-% monodromy per probe now, so the overlay costs ~0.44x the S-field instead.
+% The t0 vote is gone. It ran the whole probe sweep once per t0 in
+% t0_list = linspace(span-(V-1), span, V) with V = min(VOTE_T0, span+1) and
+% span = T - Nwin, accumulated low_votes/high_votes/S_sum/S_cnt over H x W,
+% and kept pixels whose vote density reached KEEP_FRAC. Three problems:
 %
-% Each kept marker also carries its own S. plot_banded_dots used to re-look-up
-% the colour from the interpolated field at the marker's position, so the
-% classification computed here never reached any figure: a probe measured as
-% low-stretch could be drawn in a high band, or dropped entirely. The value
-% measured at the probe is now what gets drawn.
+%   * It could not average anything at the shipped settings. While
+%     cycles <= Nwin, span = 0, so V = 1 -- a single pass, and the vote
+%     reduced to "keep what one pass found".
+%   * The moment cycles exceeds Nwin it switches on, and the cost of this
+%     overlay jumps with it: span reaches VOTE_T0-1 by cycle Nwin+4, so the
+%     probe sweep runs 5 times instead of once. Nothing warned about the step.
+%   * Even when it did run, neighbouring t0 windows share Nwin-1 of their
+%     kicks, so it averaged five samples that are ~92% the same measurement.
+%     The axis that would actually reduce variance is independent kick
+%     realisations, not adjacent start times.
 %
-% The temporal vote across t0 is kept, but note it only engages when
-% span = T - Nwin > 0. While cycles <= Nwin that is 0, V = 1, and this is a
-% single pass with no averaging. Neighbouring t0 windows also share Nwin-1 of
-% their kicks, so averaging over them is close to averaging one sample;
-% independent kick realisations are the axis that would actually help.
+% Rasterising also cost 4 H x W double accumulators (~118 MB at 1920x1920)
+% and merged probes landing in the same pixel, which discarded ~0.3% of them
+% and did so preferentially where stretching piles material onto filaments.
+% Emitting the list keeps every probe and its sub-pixel position.
 
 Nwin = min(P.Nwin, numel(dp_x_hist));
-T = numel(dp_x_hist);
+T    = numel(dp_x_hist);
 if T < 1 || Nwin < 1
     xyLow = zeros(0,2); xyHigh = zeros(0,2);
     sLow  = zeros(0,1); sHigh  = zeros(0,1);
-    stats = struct('n_low',0,'n_high',0,'passes',0);
+    stats = struct('n_low',0,'n_high',0,'n_probes',0,'n_rejected',0);
     return;
 end
 
-span = max(0, T - Nwin);
-V = min(P.VOTE_T0, span+1);
-if V <= 1
-    t0_list = span;
-else
-    t0_list = unique(round(linspace(max(0, span-(V-1)), span, V)));
-end
+t0 = max(0, T - Nwin);          % most recent window
 
 pitch_y = P.PITCH_YX(1);
 pitch_x = P.PITCH_YX(2);
-
 ys = floor(pitch_y/2) : pitch_y : (H-1);
 xs = floor(pitch_x/2) : pitch_x : (W-1);
 [Xg, Yg] = meshgrid(xs, ys);
-probes = [Yg(:), Xg(:)];              % [y,x] zero-based
+nP = numel(Xg);
 
-low_votes    = zeros(H,W);
-high_votes   = zeros(H,W);
-S_sum        = zeros(H,W);            % accumulate S at each deposit pixel
-S_cnt        = zeros(H,W);
-total_passes = 0;
+jy = (2*rand(nP,1)-1) * P.JITTER_FR * pitch_y;
+jx = (2*rand(nP,1)-1) * P.JITTER_FR * pitch_x;
+py = mod(Yg(:) + jy, H);
+px = mod(Xg(:) + jx, W);
 
-for t0 = t0_list
-    total_passes = total_passes + 1;
+xyAll = nan(nP, 2);             % [x y], 1-based, sub-pixel
+sAll  = nan(nP, 1);
 
-    nP = size(probes,1);
-    jy = (2*rand(nP,1)-1) * P.JITTER_FR * pitch_y;
-    jx = (2*rand(nP,1)-1) * P.JITTER_FR * pitch_x;
-    Pj  = probes + [jy jx];
-    Pj(:,1) = mod(Pj(:,1), H);
-    Pj(:,2) = mod(Pj(:,2), W);
+for j = 1:nP
+    [M0_raw, xyN0w] = kd_dyn_vert('monodromy_with_final', py(j), px(j), t0, Nwin, ...
+                                  dp_x_hist, Tau, H, W, row0, 1e-3, true);
+    [M0, det0_raw] = kd_dyn_vert('symplectify2x2', M0_raw, 5e-3);
+    if isempty(M0), continue; end
+    if ~isfinite(det0_raw) || abs(det0_raw-1) > P.DET_TOL, continue; end
 
-    pass_low  = false(H,W);
-    pass_high = false(H,W);
-
-    for j = 1:size(Pj,1)
-        y0 = Pj(j,1); x0 = Pj(j,2);
-
-        [M0_raw, xyN0w] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, ...
-                                      dp_x_hist, Tau, H, W, row0, 1e-3, true);
-        [M0, det0_raw] = kd_dyn_vert('symplectify2x2', M0_raw, 5e-3);
-        if isempty(M0), continue; end
-        if ~isfinite(det0_raw) || abs(det0_raw-1) > P.DET_TOL, continue; end
-
-        S0 = monodromy_to_Smax(M0);
-
-        if P.DEPOSIT_AT_FINAL
-            y_dep = xyN0w(2); x_dep = xyN0w(1);
-        else
-            y_dep = y0;       x_dep = x0;
-        end
-        iy = mod(floor(y_dep), H) + 1;
-        ix = mod(floor(x_dep), W) + 1;
-
-        % Deposits are per-pixel, so probes landing in the same pixel merge.
-        % Measured at pitch 12 and Nwin 12 that is ~0.3% of probes.
-        if S0 <= P.S_THR
-            pass_low(iy, ix)  = true;
-        else
-            pass_high(iy, ix) = true;
-        end
-        S_sum(iy,ix) = S_sum(iy,ix) + S0;
-        S_cnt(iy,ix) = S_cnt(iy,ix) + 1;
+    if P.DEPOSIT_AT_FINAL
+        y_dep = xyN0w(2);  x_dep = xyN0w(1);
+    else
+        y_dep = py(j);     x_dep = px(j);
     end
 
-    low_votes  = low_votes  + double(pass_low);
-    high_votes = high_votes + double(pass_high);
+    xyAll(j,:) = [mod(x_dep, W) + 1, mod(y_dep, H) + 1];
+    sAll(j)    = monodromy_to_Smax(M0);
 end
 
-low_density  = low_votes  / max(1,total_passes);
-high_density = high_votes / max(1,total_passes);
+ok     = isfinite(sAll);
+isLow  = ok & (sAll <= P.S_THR);
+isHigh = ok & (sAll >  P.S_THR);
 
-keep_low  = (low_density  >= P.KEEP_FRAC);
-keep_high = (high_density >= P.KEEP_FRAC);
+xyLow  = xyAll(isLow, :);   sLow  = sAll(isLow);
+xyHigh = xyAll(isHigh,:);   sHigh = sAll(isHigh);
 
-S_dep = S_sum ./ max(S_cnt, 1);
-
-[iyL, ixL] = find(keep_low);
-[iyH, ixH] = find(keep_high);
-
-xyLow  = [ixL, iyL];   % [x y]
-xyHigh = [ixH, iyH];
-sLow   = S_dep(sub2ind([H W], iyL, ixL));
-sHigh  = S_dep(sub2ind([H W], iyH, ixH));
-
-stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_passes);
+stats = struct('n_low', nnz(isLow), 'n_high', nnz(isHigh), ...
+               'n_probes', nP, 'n_rejected', nnz(~ok));
 end
 
 function [Sfine_final, maskFine_final, Scoarse, maskC] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
