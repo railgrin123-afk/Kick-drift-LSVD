@@ -625,6 +625,12 @@ for it = 1:cycles
                 contour(Sfine_final, [1.2 1.5 2.0 3.0 4.0], 'w', 'LineWidth', 0.8);
             end
 
+            % MAGENTA overlay: S > S_THR last cycle, S <= S_THR now
+            if SHOW_Y2B_MAGENTA && any(y2bMask_final(:))
+                overlay_mask_rgb(y2bMask_final, [1 0 1], ...
+                                 min(0.60, SParams.TRANS_ALPHA + 0.10));
+            end
+
             hold off;
             drawnow;
             save_cycle_figure(figSF,   "continuous_S_field", it);
