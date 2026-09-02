@@ -1080,7 +1080,7 @@ end
 if iEnd - iStart < 1
     warning('Fit window is cycles %d-%d: fewer than 2 points.', iStart, iEnd);
 end
-fprintf('Using sampled data from cycle %d to %d for fitting.\n', iStart, iEnd);
+fprintf('Fitting window lengths N = %d to %d (t_0 pinned at 0 throughout).\n', iStart, iEnd);
 
 %% ------------------------------------------------------------------------
 %%  Figure 6500: LOW-STRETCH AREA (area_blue_px) using ACTUAL cycle axis
@@ -1120,15 +1120,15 @@ semilogy(xA(goodA), yA(goodA), 'o-', 'LineWidth',1.5);
 if nnz(goodA) >= 2
     semilogy(xA(goodA), yA_fit, '--', 'LineWidth',1.8);
     legend('intersection', 'data', ...
-           sprintf('exp fit: A = %.3e exp(%.3f c)', A0A, kA), ...
+           sprintf('exp fit: A = %.3e exp(%.3f N)', A0A, kA), ...
            'Location','best');
 else
     legend('intersection', 'data', 'Location','best');
 end
 grid on;
-xlabel('cycle');
+xlabel('window length  N  (= cycle index while t_0 is pinned at 0)');
 ylabel('low-stretch area (pixels)');
-title('Low-stretch area decay (semilogy, actual cycle axis)');
+title('Low-stretch area decay vs window length N (semilogy)');
 xlim([cStar cycles]);
 
 % --- right: linearized log plot ---
@@ -1144,80 +1144,24 @@ else
     legend('intersection', 'log(data)', 'Location','best');
 end
 grid on;
-xlabel('cycle');
+xlabel('window length  N');
 ylabel('log(low-stretch area)');
-title(sprintf('Linearized decay: log(A) vs cycle | tau = %.3f cycles', tauA));
+title(sprintf('Linearized decay: log(A) vs N | tau = %.3f in units of N', tauA));
 xlim([cStar cycles]);
 
-%% ------------------------------------------------------------------------
-%%  Figure 6501: ALL LOW-STRETCH BLOBS TOTAL AREA using ACTUAL cycle axis
-%% ------------------------------------------------------------------------
-xB = (iStart:iEnd)';            % N-varying regime only
-yB = total_low_blob_area_px_fullres(iStart:iEnd);
+% Figure 6501 used to repeat this fit on total_low_blob_area_px_fullres.
+% That series is sum(cellfun(@numel, CC_low_cycle)), and get_CC_full applies
+% no size filter, so the components partition blueMask exactly and the sum is
+% identically nnz(blueMask) = area_blue_px. It was the same fit on the same
+% numbers in a second window. Asserted here so that if a size filter is ever
+% added the two stop being interchangeable loudly rather than silently.
+assert(all(isnan(total_low_blob_area_px_fullres) | ...
+           total_low_blob_area_px_fullres == area_blue_px), ...
+       ['total_low_blob_area_px_fullres has diverged from area_blue_px; ' ...
+        'the blob decomposition no longer partitions blueMask.']);
 
-goodB = isfinite(xB) & isfinite(yB) & (yB > 0);
-
-if nnz(goodB) >= 2
-    pB = polyfit(xB(goodB), log(yB(goodB)), 1);   % log(A) = pB(1)*cycle + pB(2)
-    logyB_fit = polyval(pB, xB(goodB));
-    yB_fit    = exp(logyB_fit);
-
-    kB   = pB(1);
-    A0B  = exp(pB(2));
-    tauB = -1 / kB;
-else
-    pB = [NaN NaN];
-    logyB_fit = [];
-    yB_fit    = [];
-    kB = NaN; A0B = NaN; tauB = NaN;
-end
-
-% interpolated value exactly at the intersection cycle
-yB_cross = interp1(1:cycles, total_low_blob_area_px_fullres, cStar, 'linear', 'extrap');
-
-figure(6501); clf;
-set(gcf,'Color','w','Position',[120 560 1150 430], ...
-    'Name','All low-stretch blobs total area decay starting at actual blue/yellow intersection cycle');
-tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
-
-% --- left: semilogy plot ---
-nexttile;
-semilogy(cStar, yB_cross, 'ks', 'MarkerFaceColor','y', 'MarkerSize',8); hold on;
-semilogy(xB(goodB), yB(goodB), 'o-', 'LineWidth',1.5);
-if nnz(goodB) >= 2
-    semilogy(xB(goodB), yB_fit, '--', 'LineWidth',1.8);
-    legend('intersection', 'data', ...
-           sprintf('exp fit: A = %.3e exp(%.3f c)', A0B, kB), ...
-           'Location','best');
-else
-    legend('intersection', 'data', 'Location','best');
-end
-grid on;
-xlabel('cycle');
-ylabel('total area of all low-stretch blobs (pixels)');
-title('All low-stretch blobs total area decay (semilogy, actual cycle axis)');
-xlim([cStar cycles]);
-
-% --- right: linearized log plot ---
-nexttile;
-plot(cStar, log(yB_cross), 'ks', 'MarkerFaceColor','y', 'MarkerSize',8); hold on;
-plot(xB(goodB), log(yB(goodB)), 'o-', 'LineWidth',1.5);
-if nnz(goodB) >= 2
-    plot(xB(goodB), logyB_fit, '--', 'LineWidth',1.8);
-    legend('intersection', 'log(data)', ...
-           sprintf('linear fit: log(A) = %.3f c %+.3f', pB(1), pB(2)), ...
-           'Location','best');
-else
-    legend('intersection', 'log(data)', 'Location','best');
-end
-grid on;
-xlabel('cycle');
-ylabel('log(total area of all low-stretch blobs)');
-title(sprintf('Linearized decay: log(A) vs cycle | tau = %.3f cycles', tauB));
-xlim([cStar cycles]);
-
-fprintf('Low-stretch area fit (actual cycle axis):            A = %.6e * exp(%.6f * c), tau = %.6f cycles\n', A0A, kA, tauA);
-fprintf('All low-stretch blobs total fit (actual cycle axis): A = %.6e * exp(%.6f * c), tau = %.6f cycles\n', A0B, kB, tauB);
+fprintf('Low-stretch area fit: A = %.6e * exp(%.6f * N), tau = %.6f in window length N\n', ...
+        A0A, kA, tauA);
 
 %% ========================================================================
 %%  E)  FINAL FULL-RESOLUTION BLOB ANALYSIS
