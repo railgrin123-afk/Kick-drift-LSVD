@@ -142,7 +142,10 @@ SParams.VOTE_T0   = 5;         % number of recent t0 windows to vote over (for d
 SParams.KEEP_FRAC = 0.50;      % fraction of passes that must agree
 SParams.PITCH_YX  = [12 12];   % probe lattice spacing
 SParams.JITTER_FR = 0.8;       % jitter as fraction of pitch
-SParams.CENTER_MUST_BE_GOOD = true;
+% No longer used: it gated the 5-point stencil vote, which has been removed.
+% A probe is now classified by its own S, so the centre is the measurement.
+% Kept so runMetadata.SParams stays comparable with earlier runs.
+SParams.CENTER_MUST_BE_GOOD = true;  %#ok<NASGU> (unused)
 
 SParams.DET_TOL = 5e-3;        % det sanity for FD monodromy
 SParams.S_THR   = 2.0;         % your criterion: S <= 2 is low-stretch
@@ -847,7 +850,7 @@ for it = 1:cycles
         Pnow.Nwin = Nw;
 
         % dots from your robust voting scheme
-        [xyLow, xyHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, Pnow, rows, cols);
+        [xyLow, xyHigh, sLow, sHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, Pnow, rows, cols);
 
         % Save the numerical dot information used by the overlay
         xyLow_history{it}  = single(xyLow);
@@ -879,7 +882,7 @@ for it = 1:cycles
         end
 
         % BANDED DOTS: each dot colored by its S-band
-        plot_banded_dots([xyLow; xyHigh], Sfine_final, dot_cmap);
+        plot_banded_dots([xyLow; xyHigh], [sLow; sHigh], dot_cmap);
 
         title(sprintf(['cycle %d: CURRENT-location S-field on cycle-0 frame (S<=%.2f) | Nwin=%d | ' ...
                        'low=%d, stretched=%d, passes=%d'], ...
@@ -915,7 +918,7 @@ for it = 1:cycles
             end
 
             % BANDED DOTS: each dot colored by its S-band
-            plot_banded_dots([xyLow; xyHigh], Sfine_final, dot_cmap);
+            plot_banded_dots([xyLow; xyHigh], [sLow; sHigh], dot_cmap);
 
             title(sprintf(['cycle %d: S-field at CURRENT locations (S<=%.2f) | Nwin=%d | ' ...
                            'low=%d, stretched=%d, passes=%d'], ...
@@ -1465,12 +1468,35 @@ function out = warp_image(image, map_func, map_args)
 end
 
 % ------------------- LOW-STRETCH DOTS (your robust voting version) -------------------
-function [xyLow, xyHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, P, H, W)
+function [xyLow, xyHigh, sLow, sHigh, stats] = Smap_dots_snapshot(dp_x_hist, row0, Tau, P, H, W)
+% Sparse markers at the FINAL positions of a jittered probe lattice, each
+% carrying the S value measured at that probe.
+%
+% The 5-point spatial stencil is gone. It ran a monodromy at the probe and at
+% +/- pitch/2 in x and y, then required 3 of 5 to agree before keeping the
+% probe. That cost 5 monodromies per probe -- 2.2x the entire S-field
+% computation it was drawn on top of -- and, because the low-stretch set is
+% filamentary at a scale comparable to the +/-6 px offsets, it acted as an
+% undocumented erosion that preferentially deleted thin filaments. One
+% monodromy per probe now, so the overlay costs ~0.44x the S-field instead.
+%
+% Each kept marker also carries its own S. plot_banded_dots used to re-look-up
+% the colour from the interpolated field at the marker's position, so the
+% classification computed here never reached any figure: a probe measured as
+% low-stretch could be drawn in a high band, or dropped entirely. The value
+% measured at the probe is now what gets drawn.
+%
+% The temporal vote across t0 is kept, but note it only engages when
+% span = T - Nwin > 0. While cycles <= Nwin that is 0, V = 1, and this is a
+% single pass with no averaging. Neighbouring t0 windows also share Nwin-1 of
+% their kicks, so averaging over them is close to averaging one sample;
+% independent kick realisations are the axis that would actually help.
 
 Nwin = min(P.Nwin, numel(dp_x_hist));
 T = numel(dp_x_hist);
 if T < 1 || Nwin < 1
     xyLow = zeros(0,2); xyHigh = zeros(0,2);
+    sLow  = zeros(0,1); sHigh  = zeros(0,1);
     stats = struct('n_low',0,'n_high',0,'passes',0);
     return;
 end
@@ -1491,14 +1517,11 @@ xs = floor(pitch_x/2) : pitch_x : (W-1);
 [Xg, Yg] = meshgrid(xs, ys);
 probes = [Yg(:), Xg(:)];              % [y,x] zero-based
 
-OFFS = [0 0; 0 0.5; 0 -0.5; 0.5 0; -0.5 0];
-
-low_votes = zeros(H,W);
-high_votes = zeros(H,W);
+low_votes    = zeros(H,W);
+high_votes   = zeros(H,W);
+S_sum        = zeros(H,W);            % accumulate S at each deposit pixel
+S_cnt        = zeros(H,W);
 total_passes = 0;
-
-REQUIRE_4_OF_5 = numel(t0_list) > 1;
-agree_needed   = REQUIRE_4_OF_5*4 + (~REQUIRE_4_OF_5)*3;
 
 for t0 = t0_list
     total_passes = total_passes + 1;
@@ -1513,59 +1536,34 @@ for t0 = t0_list
     pass_low  = false(H,W);
     pass_high = false(H,W);
 
-    for j=1:size(Pj,1)
+    for j = 1:size(Pj,1)
         y0 = Pj(j,1); x0 = Pj(j,2);
 
-        [M0_raw, xyN0w] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
-        xN0 = xyN0w(1); yN0 = xyN0w(2);
-
+        [M0_raw, xyN0w] = kd_dyn_vert('monodromy_with_final', y0, x0, t0, Nwin, ...
+                                      dp_x_hist, Tau, H, W, row0, 1e-3, true);
         [M0, det0_raw] = kd_dyn_vert('symplectify2x2', M0_raw, 5e-3);
         if isempty(M0), continue; end
         if ~isfinite(det0_raw) || abs(det0_raw-1) > P.DET_TOL, continue; end
 
         S0 = monodromy_to_Smax(M0);
 
-        agree_low = 0;
-        agree_high = 0;
-
-        for ii=1:size(OFFS,1)
-            dy=OFFS(ii,1); dx=OFFS(ii,2);
-            yy = mod(y0 + dy*pitch_y, H);
-            xx = mod(x0 + dx*pitch_x, W);
-
-            if dy==0 && dx==0
-                Si = S0;
-            else
-                [M_raw, ~] = kd_dyn_vert('monodromy_with_final', yy, xx, t0, Nwin, dp_x_hist, Tau, H, W, row0, 1e-3, true);
-                [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, 5e-3);
-                if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
-                    Si = NaN;
-                else
-                    Si = monodromy_to_Smax(M_sym);
-                end
-            end
-
-            if isfinite(Si)
-                if Si <= P.S_THR, agree_low = agree_low + 1; else, agree_high = agree_high + 1; end
-            end
-        end
-
-        center_is_low = (S0 <= P.S_THR);
-
         if P.DEPOSIT_AT_FINAL
-            y_dep = yN0; x_dep = xN0;
+            y_dep = xyN0w(2); x_dep = xyN0w(1);
         else
-            y_dep = y0;  x_dep = x0;
+            y_dep = y0;       x_dep = x0;
         end
         iy = mod(floor(y_dep), H) + 1;
         ix = mod(floor(x_dep), W) + 1;
 
-        if (agree_low >= agree_needed) && (~P.CENTER_MUST_BE_GOOD || center_is_low)
-            pass_low(iy, ix) = true;
-        end
-        if (agree_high >= agree_needed) && (~P.CENTER_MUST_BE_GOOD || ~center_is_low)
+        % Deposits are per-pixel, so probes landing in the same pixel merge.
+        % Measured at pitch 12 and Nwin 12 that is ~0.3% of probes.
+        if S0 <= P.S_THR
+            pass_low(iy, ix)  = true;
+        else
             pass_high(iy, ix) = true;
         end
+        S_sum(iy,ix) = S_sum(iy,ix) + S0;
+        S_cnt(iy,ix) = S_cnt(iy,ix) + 1;
     end
 
     low_votes  = low_votes  + double(pass_low);
@@ -1578,16 +1576,19 @@ high_density = high_votes / max(1,total_passes);
 keep_low  = (low_density  >= P.KEEP_FRAC);
 keep_high = (high_density >= P.KEEP_FRAC);
 
+S_dep = S_sum ./ max(S_cnt, 1);
+
 [iyL, ixL] = find(keep_low);
 [iyH, ixH] = find(keep_high);
 
 xyLow  = [ixL, iyL];   % [x y]
 xyHigh = [ixH, iyH];
+sLow   = S_dep(sub2ind([H W], iyL, ixL));
+sHigh  = S_dep(sub2ind([H W], iyH, ixH));
 
 stats = struct('n_low',size(xyLow,1), 'n_high',size(xyHigh,1), 'passes',total_passes);
 end
 
-% ------------------- S magnitude field vs start (this is the "contour plot") -------------------
 function [Sfine_final, maskFine_final, Scoarse, maskC] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
 % Stretching field S on a regular grid of FINAL (current) positions.
 %
@@ -2206,20 +2207,21 @@ SVDdata.finalY = finalY;
 end
 
 % ------------------- plot dots colored by their S-band -------------------
-function plot_banded_dots(xyAll, Sfine_final, dot_cmap)
-% xyAll        - [N x 2] dot positions [x y] (1-based pixel coords)
-% Sfine_final  - HxW S-field at current locations
-% dot_cmap     - 12x3 RGB table, one row per band
+function plot_banded_dots(xyAll, sAll, dot_cmap)
+% xyAll    - [N x 2] dot positions [x y] (1-based pixel coords)
+% sAll     - [N x 1] the S value MEASURED at each dot
+% dot_cmap - 12x3 RGB table, one row per band
+%
+% sAll used to be the interpolated S-field, and each dot's colour was looked
+% up from it at the dot's position. That discarded the value actually
+% measured at the probe -- a dot measured low-stretch could land on an
+% interpolated cell above the threshold and be drawn in a high band or
+% dropped. Colours now come from the measurement.
 
-if isempty(xyAll) || isempty(Sfine_final), return; end
+if isempty(xyAll) || isempty(sAll), return; end
 
-[H, W] = size(Sfine_final);
 N = size(xyAll, 1);
-
-ix = max(1, min(W, round(xyAll(:,1))));
-iy = max(1, min(H, round(xyAll(:,2))));
-lin = sub2ind([H W], iy, ix);
-dot_S = Sfine_final(lin);
+dot_S = sAll(:);
 
 % Only 6 selected ranges get dots; everything else (S>=3.0 and NaN) is skipped.
 band = zeros(N, 1);
