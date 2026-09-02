@@ -151,8 +151,21 @@ SParams.S_THR   = 2.0;         % your criterion: S <= 2 is low-stretch
 SParams.DEPOSIT_AT_FINAL = true;
 
 % -------- S-field (magnitude map) settings (this makes the contour plot clean) -----
-SParams.FIELD_STEP        = 8;     % coarsening for S-field evaluation (bigger = faster)
-SParams.FIELD_SMOOTH_SIG  = 1.0;   % smoothing strength in "grid cells"
+% FIELD_STEP sets the lattice S is measured on; cost scales as step^-2.
+% The low-stretch AREA FRACTION is unbiased at any step (see Sfield_snapshot),
+% so 8 is a legitimate setting for the headline number and costs 1/4 of this.
+% 4 is chosen because blob MORPHOLOGY does need resolution: the S<=2 set at
+% N=12 has an autocorrelation length of ~15 px in log S, and a step-8 lattice
+% resolves only the components holding ~94% of the low area, a step-4 lattice
+% noticeably more. Raise it back to 8 if the run is area-only and tight on
+% time; do not raise it above ~8, which is already ~2 samples per correlation
+% length.
+SParams.FIELD_STEP        = 4;     % coarsening for S-field evaluation (bigger = faster)
+% Smoothing is a DISPLAY choice and is applied in log S, to the display copy
+% only -- never to the values that get thresholded or counted. 0 disables it.
+% It was 1.0 and was applied, in linear S, to the field that everything was
+% measured from, which alone deleted 83% of the low-stretch cells.
+SParams.FIELD_SMOOTH_SIG  = 0;     % display-only smoothing, in "grid cells", on log S
 SParams.FIELD_ALPHA       = 0.28;  % transparency when overlaying on the image
 SParams.S_CLIP_MAX        = 15;    % color scale upper cap for display (logarithmic, so high S compressed)
 
@@ -182,7 +195,10 @@ cur = img0;
 % (This is just analysis naming; it does NOT change your colormap.)
 SParams.BLUE_IS_LOW  = true;      % blue-region = (S <= S_THR)
 SParams.BLOB_CONN    = 4;         % 4-connected blobs (use 8 if you want)
-SParams.BLOB_STEP    = 4;         % downsample factor for blob counting (1 = full res)
+% BLOB_STEP is no longer used. Blob counting now runs on the FIELD_STEP
+% lattice, which is already the sampled grid; decimating that a second time
+% only discarded resolution the monodromies had been paid for.
+SParams.BLOB_STEP    = 4;         % UNUSED (see above); kept so saved metadata stays comparable
 
 % per-cycle totals from the FULL Sfine grid (exact totals)
 area_blue_px   = nan(cycles,1);
@@ -202,7 +218,14 @@ med_yellow_blob_area_px  = nan(cycles,1);
 
 max_blue_blob_area_px    = nan(cycles,1);
 max_yellow_blob_area_px  = nan(cycles,1);
-% -------------------- ADD-ON: full-res ranked low-stretch blob areas per cycle --------------------
+% -------------------- ranked low-stretch blob areas per cycle --------------------
+% The "_fullres" suffix is about UNITS, not sampling: every *_area_px_* below
+% is in full-resolution px^2. The components themselves are found on the
+% FIELD_STEP lattice, because that is where S was actually measured -- so
+% n_low_blobs_fullres is a count of components resolved at FIELD_STEP, and
+% components smaller than one lattice cell are not in it. Areas are robust to
+% that (the components >= 64 px hold ~94% of the low-stretch area); the bare
+% count is not, so read it as bookkeeping rather than as physics.
 TOPK_LOW_BLOBS = 5;
 
 n_low_blobs_fullres              = nan(cycles,1);
@@ -340,26 +363,52 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine_final, maskFine_final] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
-                                            t0_recent, Nw, SParams);
+        [Sfine_final, maskFine_final, Scoarse, maskC] = ...
+            Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+                            t0_recent, Nw, SParams);
         cycleData.S(:,:,it)    = Sfine_final;
         cycleData.mask(:,:,it) = maskFine_final;
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
 
+        % Two families of mask, and they are not interchangeable:
+        %
+        %   *C  (validC/blueC/yellowC) live on the FIELD_STEP lattice and hold
+        %       the values actually measured. Every NUMBER comes from these.
+        %   Mask (valid/blueMask/yellowMask) live at full resolution and come
+        %       from the interpolated display copy. Only pictures use these.
+        %
+        % They used to be the same object: the fine masks were built from the
+        % smoothed, upsampled field and then counted. That reported a
+        % low-stretch fraction of 0.012 where the truth is 0.059, because both
+        % the smoothing and the linear interpolation erode the low set from
+        % its boundary inward (Sfield_snapshot has the measurements). Counting
+        % on the lattice removes the bias outright rather than reducing it,
+        % and costs nothing.
         if isempty(Sfine_final) || isempty(maskFine_final) || ~any(maskFine_final(:))
             warning('cycle %d: current-location S-field is empty; skipping current-location analysis.', it);
 
             valid      = false(rows, cols);
             blueMask   = false(rows, cols);
             yellowMask = false(rows, cols);
+            validC     = false(size(Scoarse));
+            blueC      = validC;
+            yellowC    = validC;
 
         else
-            % Use CURRENT / FINAL location field only
+            % ---- MEASURED, on the lattice that was evaluated ----
+            validC  = maskC & isfinite(Scoarse);
+            blueC   = validC & (Scoarse <= SParams.S_THR);
+            yellowC = validC & (Scoarse >  SParams.S_THR);
+
+            % ---- DISPLAY ONLY, at full resolution ----
             valid      = maskFine_final & isfinite(Sfine_final);
             blueMask   = valid & (Sfine_final <= SParams.S_THR);   % low stretch at current location
             yellowMask = valid & (Sfine_final >  SParams.S_THR);   % high stretch at current location
 
         end
+
+        % one measured lattice cell stands for this many full-resolution px
+        cellArea = SParams.FIELD_STEP^2;
 
         % ---- MAGENTA: material that dropped from S > S_THR to S <= S_THR ----
         % This follows the PARCEL, not the screen pixel. Every pixel of the
@@ -408,21 +457,45 @@ for it = 1:cycles
             end
             clear Xb Yb y1b x1b xpb x0f i0b i1b dpb ypb xq yq Sp
         end
+        % This one number stays at display resolution, unavoidably: the parcel
+        % that lands on a given pixel came from an arbitrary point of the
+        % previous frame, not from a lattice node, so S_prev has to be
+        % interpolated somewhere no matter what. Numerator and denominator are
+        % both counted on the same fine grid, so the ratio is at least
+        % self-consistent, but it inherits the reconstruction error the
+        % lattice-based fractions above no longer have -- read it as a trend
+        % across cycles rather than as a calibrated area.
         y2b_area_px(it) = nnz(y2bMask_final);
         denom = nnz(valid);
         if denom > 0, y2b_frac(it) = y2b_area_px(it) / denom; else, y2b_frac(it) = 0; end
         cycleData.y2bMask(:,:,it) = y2bMask_final;
 
-        % -------------------- ADD-ON: full-res low-stretch blob areas this cycle --------------------
-        % One blob = one connected component of the low-stretch set S <= S_THR.
-        % This uses the full-resolution blueMask, not the downsampled blueB.
+        % -------------------- low-stretch blob areas this cycle --------------------
+        % One blob = one connected component of the low-stretch set S <= S_THR,
+        % taken on the MEASURED lattice and converted to full-resolution px^2.
+        %
+        % These used to be components of the full-resolution blueMask, i.e. of
+        % the interpolated picture. Structure finer than FIELD_STEP in that
+        % image is reconstruction: the upsampler cannot invent detail between
+        % two samples, so a component a few px across was an artefact of
+        % drawing rather than a measured island.
+        %
+        % What a blob count can and cannot tell you here: measured against the
+        % 1 px truth, the S<=2 set breaks into 348 components whose MEDIAN area
+        % is 1 px, so the raw count is dominated by isolated pixels where the
+        % field just dips under the threshold. The area is not -- the 27
+        % components of >=64 px hold 94% of the low-stretch area and the 13 of
+        % >=256 px hold 82%. Treat total/largest/top-k AREA as the physical
+        % quantity and the bare COUNT as resolution- and threshold-sensitive.
+        CC_low_meas = get_CC_full(blueC, SParams.BLOB_CONN);
 
+        % components of the DISPLAY mask, kept only to draw the blob overlay
         CC_low_cycle = get_CC_full(blueMask, SParams.BLOB_CONN);
 
-        if isempty(CC_low_cycle)
+        if isempty(CC_low_meas)
             aLow_full = [];
         else
-            aLow_full = cellfun(@numel, CC_low_cycle(:));
+            aLow_full = cellfun(@numel, CC_low_meas(:)) * cellArea;
             aLow_full = sort(aLow_full(:), 'descend');
         end
 
@@ -448,40 +521,45 @@ for it = 1:cycles
         end
 
         % -------------------- CURRENT-LOCATION blue/yellow area --------------------
-        area_blue_px(it)   = nnz(blueMask);
-        area_yellow_px(it) = nnz(yellowMask);
-        area_total_px(it)  = nnz(valid);
+        % Counted on the measured lattice, reported in full-resolution px^2 so
+        % the absolute areas keep the units every downstream plot expects.
+        % The FRACTION is the lattice estimate directly: the share of sampled
+        % points with S <= S_THR is an unbiased estimator of the area fraction
+        % of {S <= S_THR}, at any FIELD_STEP (measured bias <= 4e-4 against 1 px
+        % truth for steps 2-16, in every case well under its own sampling
+        % noise). Counting the upsampled picture instead returned 0.012 where
+        % the truth is 0.059.
+        area_blue_px(it)   = nnz(blueC)   * cellArea;
+        area_yellow_px(it) = nnz(yellowC) * cellArea;
+        area_total_px(it)  = nnz(validC)  * cellArea;
 
-        if area_total_px(it) > 0
-            frac_blue(it)   = area_blue_px(it)   / area_total_px(it);
-            frac_yellow(it) = area_yellow_px(it) / area_total_px(it);
+        if nnz(validC) > 0
+            frac_blue(it)   = nnz(blueC)   / nnz(validC);
+            frac_yellow(it) = nnz(yellowC) / nnz(validC);
         else
             frac_blue(it)   = NaN;
             frac_yellow(it) = NaN;
         end
 
-        % -------------------- (NEW) BLOB COUNTS (CONNECTED COMPONENTS) --------------------
-        stepB = max(1, SParams.BLOB_STEP);
-
-        % downsample for speed (blob counts are usually stable under mild downsampling)
-        blueB   = blueMask(1:stepB:end, 1:stepB:end);
-        yellowB = yellowMask(1:stepB:end, 1:stepB:end);
-
-        % blob stats (areas are in "downsample pixels" -> convert back to full-res pixels)
-        [nB, aB] = blob_stats_any(blueB,   SParams.BLOB_CONN);
-        [nY, aY] = blob_stats_any(yellowB, SParams.BLOB_CONN);
+        % -------------------- BLOB COUNTS (CONNECTED COMPONENTS) --------------------
+        % Taken on the measured lattice. SParams.BLOB_STEP used to downsample
+        % blueMask again here; that is now redundant, because blueC already IS
+        % the sampled grid, and stacking a second decimation on top of it only
+        % threw away resolution the monodromies had already paid for.
+        [nB, aB] = blob_stats_any(blueC,   SParams.BLOB_CONN);
+        [nY, aY] = blob_stats_any(yellowC, SParams.BLOB_CONN);
 
         n_blue_blobs(it)   = nB;
         n_yellow_blobs(it) = nY;
 
         if ~isempty(aB)
-            aBpx = aB(:) * stepB^2;
+            aBpx = aB(:) * cellArea;
             mean_blue_blob_area_px(it) = mean(aBpx);
             med_blue_blob_area_px(it)  = median(aBpx);
             max_blue_blob_area_px(it)  = max(aBpx);
         end
         if ~isempty(aY)
-            aYpx = aY(:) * stepB^2;
+            aYpx = aY(:) * cellArea;
             mean_yellow_blob_area_px(it) = mean(aYpx);
             med_yellow_blob_area_px(it)  = median(aYpx);
             max_yellow_blob_area_px(it)  = max(aYpx);
@@ -782,9 +860,13 @@ for it = 1:cycles
             colormap(gca, cmap_blue_yellow); colorbar;
             apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
 
+            % blobs are OUTLINED from the display mask so the picture stays at
+            % full resolution, but the count quoted is the MEASURED one
             nB_cyc = numel(CC_low_cycle);
-            title(sprintf('cycle %d: s_1(x_0,y_0)  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs', ...
-                          it, SParams.S_THR, Nw, nB_cyc));
+            title(sprintf(['cycle %d: s_1(x_N,y_N)  |  S_{THR}=%.1f  |  Nwin=%d  |  ' ...
+                           '%d blobs measured at %d px  (%.3f of frame)'], ...
+                          it, SParams.S_THR, Nw, n_low_blobs_fullres(it), ...
+                          SParams.FIELD_STEP, frac_blue(it)));
             hold on;
             % S=S_THR boundary
             contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.5);
@@ -1157,27 +1239,38 @@ if SHOW_S_FIELD_FIG && exist('Sfine_final','var') && ~isempty(Sfine_final)
            'Final window differs from the last cycle''s; reuse would be invalid.');
     Sfin    = Sfine_final;
     maskFin = maskFine_final;
+    Scfin   = Scoarse;
+    maskCfin= maskC;
 else
     fprintf('Computing S-field on the final window ...\n');
-    [Sfin, maskFin] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+    [Sfin, maskFin, Scfin, maskCfin] = Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                                       t0_fin, Nw_fin, SParams);
 end
 
-valid_fin     = maskFin & isfinite(Sfin);
-low_mask_fin  = valid_fin & (Sfin <= SParams.S_THR);
-high_mask_fin = valid_fin & (Sfin >  SParams.S_THR);
+% Same split as the per-cycle path: the summary is measured on the lattice
+% that was actually evaluated, and Sfin is kept only to draw fig 7001.
+% Thresholding Sfin here reported a low-stretch fraction ~5x too small,
+% because smoothing and linear upsampling both erode the low set inward
+% (see Sfield_snapshot for the measurements).
+step_fin  = SParams.FIELD_STEP;
+cellA_fin = step_fin^2;
 
-tot_valid  = nnz(valid_fin);
-tot_low    = nnz(low_mask_fin);
-tot_high   = nnz(high_mask_fin);
-frac_low_f = tot_low  / max(1, tot_valid);
-frac_high_f= tot_high / max(1, tot_valid);
+valid_fin     = maskCfin & isfinite(Scfin);
+low_mask_fin  = valid_fin & (Scfin <= SParams.S_THR);
+high_mask_fin = valid_fin & (Scfin >  SParams.S_THR);
 
-%% -- connected components at FULL resolution --
-fprintf('Running full-resolution connected-component analysis ...\n');
+% areas reported in full-resolution px^2; fractions are the lattice estimate
+tot_valid  = nnz(valid_fin) * cellA_fin;
+tot_low    = nnz(low_mask_fin) * cellA_fin;
+tot_high   = nnz(high_mask_fin) * cellA_fin;
+frac_low_f = nnz(low_mask_fin)  / max(1, nnz(valid_fin));
+frac_high_f= nnz(high_mask_fin) / max(1, nnz(valid_fin));
+
+%% -- connected components on the measured lattice --
+fprintf('Running connected-component analysis on the measured lattice ...\n');
 CC_final = get_CC_full(low_mask_fin, SParams.BLOB_CONN);
 nF       = numel(CC_final);
-fprintf('  Found %d low-stretch blob(s).\n', nF);
+fprintf('  Found %d low-stretch blob(s) at %d px sampling.\n', nF, step_fin);
 
 %% -- compute per-blob statistics --
 [H_im, W_im] = size(low_mask_fin);
@@ -1196,22 +1289,26 @@ blob_compact = zeros(nF,1);
 for k = 1:nF
     idx_lin  = CC_final{k};
     [ry, rx] = ind2sub([H_im, W_im], idx_lin);
-    A = numel(idx_lin);
+    A_cell = numel(idx_lin);            % in lattice cells
+    A      = A_cell * cellA_fin;        % in full-resolution px^2
 
+    % lattice index i sits at pixel (i-1)*step + 1
     blob_area(k)  = A;
     blob_frac(k)  = A / max(1, tot_valid);
-    blob_cx(k)    = mean(rx);
-    blob_cy(k)    = mean(ry);
-    blob_xmin(k)  = min(rx);  blob_xmax(k) = max(rx);
-    blob_ymin(k)  = min(ry);  blob_ymax(k) = max(ry);
+    blob_cx(k)    = (mean(rx)-1)*step_fin + 1;
+    blob_cy(k)    = (mean(ry)-1)*step_fin + 1;
+    blob_xmin(k)  = (min(rx)-1)*step_fin + 1;  blob_xmax(k) = (max(rx)-1)*step_fin + 1;
+    blob_ymin(k)  = (min(ry)-1)*step_fin + 1;  blob_ymax(k) = (max(ry)-1)*step_fin + 1;
     blob_r_eq(k)  = sqrt(A / pi);
 
-    % perimeter-based compactness  C = 4*pi*A / P^2
+    % perimeter-based compactness  C = 4*pi*A / P^2.
+    % Computed in lattice units and left there: under a change of scale
+    % A -> A*s^2 and P -> P*s, so C is scale-invariant and needs no conversion.
     BW_blob = false(H_im, W_im);
     BW_blob(idx_lin) = true;
     P = compute_perimeter(BW_blob);
     if P > 0
-        blob_compact(k) = 4*pi*A / P^2;
+        blob_compact(k) = 4*pi*A_cell / P^2;
     else
         blob_compact(k) = NaN;
     end
@@ -1308,7 +1405,12 @@ if nF > 0
     end
     blob_mask_fin = label_img_fin > 0;
     rgb_overlay_fin = ind2rgb(label_img_fin, [0 0 0; cmap_blobs]);
-    hB_fin = image(rgb_overlay_fin);
+    % the label image is on the FIELD_STEP lattice while Sfin behind it is at
+    % full resolution, so place it explicitly over the pixels it represents
+    % rather than letting it default to the top-left W_im x H_im corner.
+    hB_fin = image(rgb_overlay_fin, ...
+                   'XData', [1, (W_im-1)*step_fin + 1], ...
+                   'YData', [1, (H_im-1)*step_fin + 1]);
     set(hB_fin,'AlphaData', 0.35 * double(blob_mask_fin));
     clear rgb_overlay_fin label_img_fin blob_mask_fin;
 
@@ -1589,16 +1691,67 @@ for iy = 1:ny
     end
 end
 
-% Smooth on the COARSE grid, where FIELD_SMOOTH_SIG's "grid cells" is what
-% the parameter actually means. (It used to be applied to the full-resolution
-% field, where sigma=1 meant one pixel, not one cell.)
-Scoarse = smooth2_gaussian_nan(Scoarse, maskC, P.FIELD_SMOOTH_SIG);
-maskC   = isfinite(Scoarse);
+% Scoarse and maskC stay RAW from here on: they are the values actually
+% measured, and they are what every NUMBER must be computed from. Smoothing
+% and upsampling below build a picture, and a picture must not be counted.
+%
+% Why this matters -- both operations bias the low-stretch set one way only.
+% S is log-normal here (measured on this system at N=12: mean log S = 2.45,
+% sd 1.21, skew(S) = 7.3, arithmetic/geometric mean ratio 2.35). Gaussian
+% smoothing takes an ARITHMETIC mean, and for a log-normal that overestimates
+% the typical value by exp(sigma^2/2). The error is not symmetric at the
+% threshold: a low island sits at S ~ 1.8 inside a chaotic sea at S ~ 10-100,
+% so averaging over the boundary is dominated by the large neighbour and eats
+% the island inward, while a chaotic cell next to an island barely moves
+% because the island's values are small. Measured on the coarse grid at
+% sigma = 1 cell: 83.1% of low cells were pushed ABOVE the threshold, and
+% 0.0% of high cells were pulled below it -- pure erosion of the low set.
+%
+% Linear interpolation in the upsample has the same defect for the same
+% reason. Between a sample at S = 1.8 and its neighbour at S = 50, a straight
+% line crosses S = 2 after 0.4% of the cell, so the reconstructed island is a
+% sliver around each low sample.
+%
+% Together, thresholding the smoothed+upsampled field reported a low-stretch
+% fraction of 0.012 against a true 0.059 -- it deleted 85% of the real
+% low-stretch pixels while inventing almost none (1.9% of what it flagged),
+% which is exactly the "regions that should be low-stretch shown as
+% high-stretch" complaint. Median |dS|/S was 52% over the frame and 147% on
+% the true low-stretch set.
+%
+% Sampling itself is NOT the problem. The fraction of lattice points with
+% S <= thr is an unbiased estimator of the area fraction of {S <= thr} for a
+% statistically homogeneous field: coarsening adds variance, never bias.
+% Measured bias against the 1 px truth over 8 kick realisations:
+%     step 16: -0.00038 (sd 0.00384)      step 4: -0.00013 (sd 0.00064)
+%     step  8: -0.00010 (sd 0.00124)      step 2: +0.00001 (sd 0.00028)
+% every one an order of magnitude below its own sampling noise. So the
+% headline area fraction is correct at ANY FIELD_STEP once it is taken from
+% Scoarse; step size buys precision and blob morphology, not accuracy.
 
-% ---- upsample to full resolution for DISPLAY ----
+% ---- smooth + upsample to full resolution, for DISPLAY ONLY ----
 % Regular grid to regular grid: ordinary separable interpolation, no
 % triangulation and no seam. NaNs propagate, so the mask survives.
+%
+% Both the smoothing and the interpolation happen in LOG S, whose geometric
+% mean is the unbiased centre for a log-normal, so the contour drawn on the
+% picture stays nearer the measured one instead of retreating inside it. It
+% also matches the rendering: apply_log_S_cmap puts this on a log colour
+% scale, so interpolating the log is what makes the COLOUR interpolate
+% linearly between samples. log is safe here -- for a 2x2 with det = 1,
+% sigma1*sigma2 = 1 and sigma1 >= sigma2, so S = sigma_max >= 1 exactly.
+%
+% This narrows the gap but does not close it (measured: thresholding the
+% reconstruction recovers 62% of the true low-stretch fraction at step 8 with
+% linear interpolation, 69% with log). The remainder is real sub-cell
+% structure that no interpolator can recover, which is the whole reason the
+% numbers come from Scoarse and not from here.
 if any(maskC(:))
+    Ldisp = log(Scoarse);
+    if P.FIELD_SMOOTH_SIG > 0
+        Ldisp = smooth2_gaussian_nan(Ldisp, maskC, P.FIELD_SMOOTH_SIG);
+    end
+
     Sfine_final = zeros(H, W, 'single');
     xrow = min(max(1:W, xs(1)), xs(end));      % clamp: no NaN strip at the far edge
     blk  = max(1, floor(2e6 / max(W,1)));
@@ -1606,7 +1759,7 @@ if any(maskC(:))
         r1b  = min(H, r0b + blk - 1);
         yrow = min(max(r0b:r1b, ys(1)), ys(end));
         [Xb, Yb] = meshgrid(xrow, yrow);
-        Sfine_final(r0b:r1b, :) = single(interp2(xs, ys, Scoarse, Xb, Yb, 'linear'));
+        Sfine_final(r0b:r1b, :) = single(exp(interp2(xs, ys, Ldisp, Xb, Yb, 'linear')));
     end
     maskFine_final = isfinite(Sfine_final);
 else
