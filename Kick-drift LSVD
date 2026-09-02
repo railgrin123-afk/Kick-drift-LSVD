@@ -128,6 +128,10 @@ SHOW_S_FIELD_FIG       = true;
 % overlay S field on the dot figure (semi-transparent)
 OVERLAY_S_FIELD_ON_DOTS = true;
 
+% magenta overlay: material that dropped from S > S_THR to S <= S_THR
+SHOW_Y2B_MAGENTA = true;
+SParams.TRANS_ALPHA = 0.45;    % transparency for the magenta overlay
+
 % MEMORY: with KEEP_FIGS_PER_CYCLE=false every cycle REUSES one window per
 % figure kind, so the session holds ~6 figures instead of 6*cycles. Each
 % figure retains its image CData (~1920x1920 RGB is tens of MB), so keeping
@@ -162,6 +166,9 @@ cmap_blue_yellow = [ 0.0*(1-t).^2 + 0.129*2.*t.*(1-t) + 0.993*t.^2, ...
                      0.25*(1-t).^2 + 0.566*2.*t.*(1-t) + 0.906*t.^2, ...
                      0.35*(1-t).^2 + 0.692*2.*t.*(1-t) + 0.144*t.^2 ];
 
+
+y2b_area_px = zeros(cycles,1);
+y2b_frac    = zeros(cycles,1);
 
 S_prev_final    = [];
 mask_prev_final = [];
@@ -213,6 +220,7 @@ cycleData = matfile("full_cycle_data.mat", "Writable", true);
 % Preallocate directly on disk
 cycleData.S(rows,cols,cycles) = single(0);
 cycleData.mask(rows,cols,cycles) = false;
+cycleData.y2bMask(rows,cols,cycles) = false;
 
 %simulation_data
 runMetadata = struct();
@@ -245,6 +253,7 @@ runMetadata.SParams = SParams;
 
 % Display switches
 runMetadata.OVERLAY_S_FIELD_ON_DOTS = OVERLAY_S_FIELD_ON_DOTS;
+runMetadata.SHOW_Y2B_MAGENTA = SHOW_Y2B_MAGENTA;
 runMetadata.SHOW_LOW_STRETCH_DOTS = SHOW_LOW_STRETCH_DOTS;
 
 % Software information
@@ -351,6 +360,58 @@ for it = 1:cycles
             yellowMask = valid & (Sfine_final >  SParams.S_THR);   % high stretch at current location
 
         end
+
+        % ---- MAGENTA: material that dropped from S > S_THR to S <= S_THR ----
+        % This follows the PARCEL, not the screen pixel. Every pixel of the
+        % current frame is the end of an orbit, so stepping it back one kick
+        % gives where that same material sat at the end of the previous cycle,
+        % and S_prev is read there. Comparing S_prev(i,j) against
+        % Sfine_final(i,j) directly -- which is what this used to do -- pairs
+        % up different parcels: material moves a median ~245 px in one step at
+        % these settings, and the two versions agree on under half the pixels
+        % they flag.
+        %
+        % Note the two fields are measured over windows of different length
+        % (N = it-1 and N = it), and S grows with N, so this marks material
+        % whose stretching fell below threshold DESPITE a longer measurement
+        % window. That is the interesting event, and it is rarer than the old
+        % version suggested: ~2.5% of the frame at Nwin=12.
+        %
+        % The threshold is SParams.S_THR. The previous version tested a
+        % hard-coded 4.8 while every label around it said 2.
+        y2bMask_final = false(rows, cols);
+        if SHOW_Y2B_MAGENTA && it > 1 && ~isempty(S_prev_final) && any(valid(:))
+            % smaller blocks than the upsampler uses: this loop keeps ~8
+            % full-block temporaries alive at once, not two
+            blk = max(1, floor(5e5 / max(cols,1)));
+            for r0b = 1:blk:rows
+                r1b = min(rows, r0b + blk - 1);
+                [Xb, Yb] = meshgrid(1:cols, r0b:r1b);
+
+                % one exact inverse step with THIS cycle's kick (0-based)
+                y1b = Yb - 1;  x1b = Xb - 1;
+                xpb = x1b - Tau*(y1b - row0);
+                x0f = floor(xpb);
+                i0b = mod(x0f, cols);  i1b = mod(i0b + 1, cols);
+                dpb = dp_x(i0b+1) + (dp_x(i1b+1) - dp_x(i0b+1)) .* (xpb - x0f);
+                ypb = y1b - dpb;
+
+                % wrap onto the displayed torus, back to 1-based, then read
+                % S_prev on its own regular grid
+                xq = min(max(mod(xpb, cols) + 1, 1), cols);
+                yq = min(max(mod(ypb, rows) + 1, 1), rows);
+                Sp = interp2(double(S_prev_final), xq, yq, 'linear');
+
+                y2bMask_final(r0b:r1b, :) = valid(r0b:r1b, :) & isfinite(Sp) & ...
+                                            (Sp > SParams.S_THR) & ...
+                                            (Sfine_final(r0b:r1b, :) <= SParams.S_THR);
+            end
+            clear Xb Yb y1b x1b xpb x0f i0b i1b dpb ypb xq yq Sp
+        end
+        y2b_area_px(it) = nnz(y2bMask_final);
+        denom = nnz(valid);
+        if denom > 0, y2b_frac(it) = y2b_area_px(it) / denom; else, y2b_frac(it) = 0; end
+        cycleData.y2bMask(:,:,it) = y2bMask_final;
 
         % -------------------- ADD-ON: full-res low-stretch blob areas this cycle --------------------
         % One blob = one connected component of the low-stretch set S <= S_THR.
@@ -502,6 +563,10 @@ for it = 1:cycles
             visualization.ContourLevel = SParams.S_THR;
             visualization.ContourColor = [1 1 1];
             visualization.ContourLineWidth = 1.1;
+
+            visualization.TransitionColor = [1 0 1];
+            visualization.TransitionAlpha = ...
+                min(0.60, SParams.TRANS_ALPHA + 0.10);
 
             visualization.DotMarkerSize = 10;
 
@@ -795,6 +860,12 @@ for it = 1:cycles
             % contour at S = S_THR on the final-location field
             contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.1);
 
+            % MAGENTA overlay: S > S_THR last cycle, S <= S_THR now
+            if SHOW_Y2B_MAGENTA && any(y2bMask_final(:))
+                overlay_mask_rgb(y2bMask_final, [1 0 1], ...
+                                 min(0.60, SParams.TRANS_ALPHA + 0.10));
+            end
+
             % BANDED DOTS: each dot colored by its S-band
             plot_banded_dots([xyLow; xyHigh], [sLow; sHigh], dot_cmap);
 
@@ -873,6 +944,24 @@ xlabel('cycle'); ylabel('area (pixels)');
 title('Total area in pixels (full-res Sfine)');
 legend('blue area','yellow area','Location','best');
 
+
+% ============ FIGURE: magenta transition area vs cycle ============
+figure(6300); clf;
+set(gcf,'Color','w','Position',[120 80 900 420], ...
+    'Name', sprintf('Dropped below S<=%.2f (same material) vs cycle', SParams.S_THR));
+tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+
+nexttile;
+plot(1:cycles, y2b_frac, 'o-','LineWidth',1.5,'Color',[1 0 1]);
+grid on;
+xlabel('cycle'); ylabel('fraction of valid pixels');
+title(sprintf('Material that fell to S<=%.2f (was >%.2f)', SParams.S_THR, SParams.S_THR));
+
+nexttile;
+plot(1:cycles, y2b_area_px, 'o-','LineWidth',1.5,'Color',[1 0 1]);
+grid on;
+xlabel('cycle'); ylabel('pixels (full-res)');
+title('Same, as pixel area');
 
 % ===================== ADD-ON FIGURE: all low-stretch blobs total area vs cycle =====================
 figure(6400); clf;
@@ -1755,6 +1844,22 @@ for r = 1:H
         areas(nBlobs,1) = cnt; %#ok<AGROW>
     end
 end
+end
+
+function h = overlay_mask_rgb(mask, rgb, alpha)
+% Overlay a solid RGB colour wherever mask==true, with transparency alpha.
+%
+% MEMORY: the colour plane is uint8 rather than double. It only ever holds
+% one constant colour, but as a double HxWx3 it cost ~88 MB per call at
+% 1920x1920.
+mask = logical(mask);
+H = size(mask,1); W = size(mask,2);
+
+rgb8   = uint8(round(255 * rgb(:)));
+rgbImg = repmat(reshape(rgb8, 1, 1, 3), H, W);
+
+h = image(rgbImg);
+set(h, 'AlphaData', alpha * double(mask));
 end
 
 function n = fignum(base, it, keep_per_cycle)
