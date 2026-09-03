@@ -163,25 +163,22 @@ SParams.DEPOSIT_AT_FINAL = true;
 
 % -------- S-field (magnitude map) settings (this makes the contour plot clean) -----
 % FIELD_STEP sets the lattice S is measured on; cost scales as step^-2.
-% The low-stretch AREA FRACTION is unbiased at any step (see Sfield_snapshot),
-% so 8 is a legitimate setting for the headline number and costs 1/4 of this.
-% 4 is chosen because blob MORPHOLOGY does need resolution: the S<=2 set at
-% N=12 has an autocorrelation length of ~15 px in log S, and a step-8 lattice
-% resolves only the components holding ~94% of the low area, a step-4 lattice
-% noticeably more.
+% 1 measures every pixel, so nothing about the S-field is reconstructed: the
+% measured field and the displayed field become the same object, blobs are
+% resolved exactly, and there is no sampling error left to argue about. It is
+% affordable now only because the sweep is vectorised and the monodromy is
+% closed form; under the old scalar loop with an svd per point this setting
+% was ~3.7M function calls per cycle.
 %
-% For the area fraction, step is a PRECISION knob, not an accuracy one. Over
-% 40 kick realisations the per-run scatter of the lattice fraction about that
-% run's own 1 px truth was
+% Above 1, step is a PRECISION knob and not an accuracy one -- the lattice
+% fraction is unbiased at every step tested (see Sfield_snapshot). Over 40
+% kick realisations the per-run scatter about that run's own 1 px truth was
 %     step 2: 0.0002    step 8: 0.0015    step 32: 0.0110
 %     step 4: 0.0005    step 16: 0.0042
 % against a fraction of ~0.056, i.e. +-0.9% relative at step 4, +-2.7% at
-% step 8, +-20% at step 32 -- while the mean bias stayed under one standard
-% error at every one of them (largest |t| = 0.97). So choose step by the
-% precision the result needs; a single coarse run that lands far from the
-% truth is a wide draw, not a biased estimator, and averaging realisations
-% closes it. Raise it back to 8 if the run is area-only and tight on time.
-SParams.FIELD_STEP        = 4;     % coarsening for S-field evaluation (bigger = faster)
+% step 8, +-20% at step 32. Raise it to 2 or 4 if a run is tight on time; the
+% headline number barely moves, and only the smallest components are lost.
+SParams.FIELD_STEP        = 1;     % 1 = measure every pixel, no reconstruction
 % Smoothing is a DISPLAY choice and is applied in log S, to the display copy
 % only -- never to the values that get thresholded or counted. 0 disables it.
 % It was 1.0 and was applied, in linear S, to the field that everything was
@@ -1625,25 +1622,18 @@ jx = (2*rand(nP,1)-1) * P.JITTER_FR * pitch_x;
 py = mod(Yg(:) + jy, H);
 px = mod(Xg(:) + jx, W);
 
-xyAll = nan(nP, 2);             % [x y], 1-based, sub-pixel
-sAll  = nan(nP, 1);
+% One vectorised sweep instead of nP scalar monodromy calls.
+% exact monodromy: det is 1 by construction, so the only real failure mode
+% is overflow. See Sfield_snapshot for why the determinant is not tested.
+[sAll, xN, yN] = monodromy_S_vec(py, px, t0, Nwin, dp_x_hist, Tau, row0);
 
-for j = 1:nP
-    % exact monodromy: det is 1 by construction, so the only real failure mode
-    % is overflow. See Sfield_snapshot for why the determinant is not tested.
-    [M0, xyN0w] = kd_dyn_vert('monodromy_with_final', py(j), px(j), t0, Nwin, ...
-                              dp_x_hist, Tau, H, W, row0, 1e-3, true);
-    if ~all(isfinite(M0(:))), continue; end
-
-    if P.DEPOSIT_AT_FINAL
-        y_dep = xyN0w(2);  x_dep = xyN0w(1);
-    else
-        y_dep = py(j);     x_dep = px(j);
-    end
-
-    xyAll(j,:) = [mod(x_dep, W) + 1, mod(y_dep, H) + 1];
-    sAll(j)    = monodromy_to_Smax(M0);
+if P.DEPOSIT_AT_FINAL
+    x_dep = xN;      y_dep = yN;
+else
+    x_dep = px;      y_dep = py;
 end
+xyAll = [mod(x_dep, W) + 1, mod(y_dep, H) + 1];
+xyAll(~isfinite(sAll), :) = NaN;
 
 ok     = isfinite(sAll);
 isLow  = ok & (sAll <= P.S_THR);
@@ -1704,38 +1694,57 @@ maskC   = false(ny, nx);
 T       = numel(dp_x_hist);
 Nw      = floor(Nwin);
 
-for iy = 1:ny
-    for ix = 1:nx
-        % the grid point IS the final position (0-based for the dynamics)
-        y = double(ys(iy) - 1);
-        x = double(xs(ix) - 1);
+% ---- blocked vectorised sweep over the lattice ----
+% This was a scalar for iy / for ix with a monodromy function call per point.
+% At FIELD_STEP = 1 that is 3.69M calls per cycle, each running its own
+% interpreted Nwin-step loop; the call and loop overhead, not the arithmetic,
+% is what made a fine lattice impractical.
+%
+% Blocked rather than fully vectorised on purpose. One array per quantity over
+% the whole 1920x1920 lattice is 29.5 MB, and the sweep needs x, y, the four
+% monodromy entries and ~7 per-step temporaries live at once -- ~400 MB before
+% MATLAB's own expression temporaries, on a script that has already had to be
+% rescued from out-of-memory failures. A block of 5e5 points holds the working
+% set near 60 MB and still amortises the interpreter completely: the speedup
+% is set by vector length, and 5e5 is far past the point where that saturates.
+nTot = ny*nx;
+blk  = min(nTot, 5e5);
 
-        % ---- exact backward integration to the initial condition ----
-        % undoing  Yc = y + dp(x);  Xc = x + Tau*(Yc - row0)
-        for k = Nw-1 : -1 : 0
-            dp = dp_x_hist{mod(t0 + k, T) + 1};
-            x  = x - Tau*(y - row0);
-            y  = y - interp_kick_x(x, dp);
-        end
+for p0 = 1:blk:nTot
+    idx = (p0 : min(nTot, p0+blk-1)).';
 
-        % ---- forward monodromy along that orbit ----
-        % The guard tests FINITENESS, not the determinant. det M = 1 holds by
-        % construction, so re-deriving it from the stored M only measures
-        % float64 cancellation -- the same defect the exact Jacobian removed.
-        % At N=40 that residual reaches 1.6e-2 on the most-stretched points,
-        % past DET_TOL, while S there is still exact to 0.0000%; testing it
-        % would throw away good measurements for a rounding artefact.
-        % Overflow is the one real failure mode and isfinite catches it.
-        [M_raw, ~] = kd_dyn_vert('monodromy_with_final', y, x, t0, Nwin, ...
-                                 dp_x_hist, Tau, H, W, row0, 1e-3, true);
+    % column-major lattice index -> 0-based pixel coordinates.
+    % ys(iy) = 1 + (iy-1)*step, so the 0-based coordinate is (iy-1)*step.
+    iy = mod(idx-1, ny);
+    ix = (idx-1 - iy) / ny;
+    y  = iy * step;
+    x  = ix * step;
 
-        if ~all(isfinite(M_raw(:)))
-            continue;                 % stays NaN and unmasked -- a real mask
-        end
-
-        Scoarse(iy,ix) = monodromy_to_Smax(M_raw);
-        maskC(iy,ix)   = true;
+    % ---- exact backward integration to the initial condition ----
+    % undoing  Yc = y + dp(x);  Xc = x + Tau*(Yc - row0)
+    for k = Nw-1 : -1 : 0
+        dp = dp_x_hist{mod(t0 + k, T) + 1};
+        n  = numel(dp);
+        x  = x - Tau*(y - row0);
+        xf = floor(x);
+        i0 = mod(xf, n);
+        d0 = dp(i0+1);
+        y  = y - (d0 + (dp(mod(i0+1, n)+1) - d0) .* (x - xf));
     end
+
+    % ---- forward monodromy along that orbit ----
+    % The guard tests FINITENESS, not the determinant. det M = 1 holds by
+    % construction, so re-deriving it from the stored M only measures
+    % float64 cancellation -- the same defect the exact Jacobian removed.
+    % At N=40 that residual reaches 1.6e-2 on the most-stretched points,
+    % past DET_TOL, while S there is still exact to 0.0000%; testing it
+    % would throw away good measurements for a rounding artefact.
+    % Overflow is the one real failure mode and isfinite catches it.
+    Sblk = monodromy_S_vec(y, x, t0, Nwin, dp_x_hist, Tau, row0);
+
+    ok = isfinite(Sblk);
+    Scoarse(idx(ok)) = Sblk(ok);
+    maskC(idx)       = ok;            % rejected points stay NaN -- a real mask
 end
 
 % Scoarse and maskC stay RAW from here on: they are the values actually
@@ -1798,7 +1807,19 @@ end
 % linear interpolation, 69% with log). The remainder is real sub-cell
 % structure that no interpolator can recover, which is the whole reason the
 % numbers come from Scoarse and not from here.
-if any(maskC(:))
+if ~any(maskC(:))
+    Sfine_final    = nan(H, W, 'single');
+    maskFine_final = false(H, W);
+
+elseif step == 1 && P.FIELD_SMOOTH_SIG <= 0
+    % At FIELD_STEP = 1 the lattice IS the full grid, so there is nothing to
+    % reconstruct: interpolating would resample a grid onto itself, and the
+    % measured field and the displayed field are the same object. Skip it --
+    % it saves a 3.7M-point interp2 and the log/exp round trip per cycle.
+    Sfine_final    = single(Scoarse);
+    maskFine_final = maskC;
+
+else
     Ldisp = log(Scoarse);
     if P.FIELD_SMOOTH_SIG > 0
         Ldisp = smooth2_gaussian_nan(Ldisp, maskC, P.FIELD_SMOOTH_SIG);
@@ -1814,9 +1835,6 @@ if any(maskC(:))
         Sfine_final(r0b:r1b, :) = single(exp(interp2(xs, ys, Ldisp, Xb, Yb, 'linear')));
     end
     maskFine_final = isfinite(Sfine_final);
-else
-    Sfine_final    = nan(H, W, 'single');
-    maskFine_final = false(H, W);
 end
 end
 
@@ -1843,28 +1861,11 @@ Sout = num ./ max(den, 1e-12);
 Sout(den < 0.15) = NaN;  % if we had almost no data support, keep it NaN
 end
 
-function Smax = monodromy_to_Smax(M)
-[~,Sig,~] = svd(M);
-Smax = Sig(1,1);
-end
-
-function theta = monodromy_to_rotation(M)
-% Extract rotation angle (local angular momentum) from 2x2 symplectic matrix.
-% Uses atan2 of off-diagonal vs diagonal trace to get rotation in radians.
-% Positive = counterclockwise rotation; negative = clockwise.
-theta = atan2(M(2,1) - M(1,2), M(1,1) + M(2,2));
-end
-
+% monodromy_to_Smax (one svd() per point) and monodromy_to_rotation are gone.
+% The svd is now the closed form inside monodromy_S_vec; monodromy_to_rotation
+% had no callers.
 
 % --------- Dynamics / monodromy backend (vertical-kick) ---------
-function varargout = kd_dyn_vert(func, varargin)
-switch lower(func)
-    case 'monodromy_with_final'
-        [varargout{1}, varargout{2}] = monodromy_with_final_vert(varargin{:});
-    otherwise
-        error('kd_dyn_vert:unknown', 'Unknown command "%s".', func);
-end
-end
 
 function dpy = interp_kick_x(x, dp_x)
 n = numel(dp_x);
@@ -1873,9 +1874,10 @@ fx=x-x0;
 dpy = dp_x(i0+1) + (dp_x(i1+1)-dp_x(i0+1))*fx;
 end
 
-function [M, xyNw] = monodromy_analytic_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0)
-% Exact monodromy by the chain rule. Replaces a 5-trajectory central
-% difference (base, +-eps in x, +-eps in y, eps = 1e-3 px).
+function [S, xN, yN] = monodromy_S_vec(y0, x0, t0, N, dp_hist, Tau, row0)
+% Exact monodromy by the chain rule, vectorised over a column of initial
+% conditions, returning sigma_max and the final positions. Replaces a
+% 5-trajectory central difference (base, +-eps in x, +-eps in y).
 %
 % One step of the map is
 %     Yc = y + f(x)
@@ -1923,43 +1925,51 @@ function [M, xyNw] = monodromy_analytic_vert(y0, x0, t0, N, dp_hist, Tau, rows, 
 % at all.
 
 T = numel(dp_hist);
-x = double(x0); y = double(y0);
+x = double(x0(:)); y = double(y0(:));
 
-a = 1; b = 0;          % M = [a b ; c d], initialised to the identity
-c = 0; d = 1;
+a = ones(size(x));  b = zeros(size(x));      % M = [a b ; c d], the identity
+c = zeros(size(x)); d = ones(size(x));
 
 for k = 0:(floor(N)-1)
     dp = dp_hist{mod(t0 + k, T) + 1};
     n  = numel(dp);
 
     % value and exact slope of interp_kick_x at x, from one cell lookup
-    xf = floor(x); i0 = mod(xf, n); i1 = mod(i0 + 1, n);
+    xf = floor(x);
+    i0 = mod(xf, n);
     d0 = dp(i0+1);
-    fp = dp(i1+1) - d0;
-    dpy = d0 + fp*(x - xf);
+    fp = dp(mod(i0+1, n)+1) - d0;
 
     % M <- J*M
     g  = 1 + Tau*fp;
-    a2 = g*a + Tau*c;   b2 = g*b + Tau*d;
-    c2 = fp*a + c;      d2 = fp*b + d;
-    a = a2; b = b2; c = c2; d = d2;
+    a2 = g.*a + Tau*c;   b2 = g.*b + Tau*d;
+    c  = fp.*a + c;      d  = fp.*b + d;
+    a  = a2;             b  = b2;
 
     % advance the trajectory with the same kick value
-    y = y + dpy;
+    y = y + d0 + fp.*(x - xf);
     x = x + Tau*(y - row0);
 end
 
-M    = [a, b; c, d];
-xyNw = [mod(x, cols), mod(y, rows)];
-end
+% sigma_max in closed form, replacing one svd() call per point.
+%
+% For a 2x2 with det = 1: sigma1*sigma2 = 1 and sigma1^2 + sigma2^2 = t, the
+% squared Frobenius norm, so (sigma1 +- sigma2)^2 = t +- 2 and
+%     sigma_max = (sqrt(t+2) + sqrt(t-2))/2.
+% t >= 2 always, by AM-GM on sigma1^2 + sigma2^2 >= 2*sigma1*sigma2, so the
+% max() only absorbs rounding at sigma_max = 1 exactly.
+%
+% Not (t + sqrt(t^2-4))/2: that is the larger root of z^2 - t z + 1, which is
+% sigma_max SQUARED, and returning it would square the whole field -- an S_THR
+% of 2 would silently become sqrt(2) on the true sigma scale. Verified against
+% svd over 200,000 random symplectic matrices: this form is exact to 1.4e-16
+% median, the squared one is off by a median factor of sigma. This version
+% also never forms t^2, which overflows for very large sigma.
+t  = a.*a + b.*b + c.*c + d.*d;
+S  = (sqrt(t + 2) + sqrt(max(t - 2, 0))) / 2;
 
-function [M, xyNw] = monodromy_with_final_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0, eps_, use_fd)
-% eps_ and use_fd are accepted so existing call sites keep working, and are
-% ignored: there is no step size to choose any more and nothing to switch
-% between. The monodromy is exact.
-if nargin < 10, eps_  = [];   end %#ok<NASGU>
-if nargin < 11, use_fd = true; end %#ok<NASGU>
-[M, xyNw] = monodromy_analytic_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0);
+xN = x;
+yN = y;
 end
 
 function [nBlobs, areas] = blob_stats_any(BW, conn)
