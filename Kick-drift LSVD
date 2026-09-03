@@ -11,7 +11,7 @@
 %
 %  CORE MATH:
 %   • NO stable/unstable anymore.
-%   • Compute Nwin-step monodromy M (finite difference).
+%   • Compute Nwin-step monodromy M (exact, chain rule).
 %   • Stretch metric: S = sigma_max(M) = largest singular value.
 %   • Criterion: S > 2  -> stretched
 %               S <= 2 -> low-stretch (tube/disk survives over the window)
@@ -144,7 +144,18 @@ SParams.Nwin      = 12;        % target window length; early cycles auto smaller
 SParams.PITCH_YX  = [12 12];   % probe lattice spacing
 SParams.JITTER_FR = 0.8;       % jitter as fraction of pitch
 
-SParams.DET_TOL = 5e-3;        % det sanity for FD monodromy
+% No longer read. The monodromy is built as a product of per-step Jacobians
+% whose determinants are identically 1, so det M = 1 by construction and the
+% probe guard tests isfinite(M) instead. Recomputing det from the stored M
+% would only measure float64 cancellation: median |det-1| is ~1e-15 at N=12,
+% but on the most-stretched points at N=40 it reaches 1.6e-2 -- past this
+% tolerance -- while S there is exact to 0.0000%, so the test would discard
+% good measurements for a rounding artefact.
+%
+% Under the old finite-difference monodromy it rejected 0.7% of probes at
+% N=12, 17.6% at N=25 and 39.5% at N=40, all of it cancellation and none of
+% it a property of the dynamics.
+SParams.DET_TOL = 5e-3;        % UNUSED (see above); kept so saved metadata stays comparable
 SParams.S_THR   = 2.0;         % your criterion: S <= 2 is low-stretch
 
 % dots deposited at START (because you want S vs where we started)
@@ -1618,11 +1629,11 @@ xyAll = nan(nP, 2);             % [x y], 1-based, sub-pixel
 sAll  = nan(nP, 1);
 
 for j = 1:nP
-    [M0_raw, xyN0w] = kd_dyn_vert('monodromy_with_final', py(j), px(j), t0, Nwin, ...
-                                  dp_x_hist, Tau, H, W, row0, 1e-3, true);
-    [M0, det0_raw] = kd_dyn_vert('symplectify2x2', M0_raw, 5e-3);
-    if isempty(M0), continue; end
-    if ~isfinite(det0_raw) || abs(det0_raw-1) > P.DET_TOL, continue; end
+    % exact monodromy: det is 1 by construction, so the only real failure mode
+    % is overflow. See Sfield_snapshot for why the determinant is not tested.
+    [M0, xyN0w] = kd_dyn_vert('monodromy_with_final', py(j), px(j), t0, Nwin, ...
+                              dp_x_hist, Tau, H, W, row0, 1e-3, true);
+    if ~all(isfinite(M0(:))), continue; end
 
     if P.DEPOSIT_AT_FINAL
         y_dep = xyN0w(2);  x_dep = xyN0w(1);
@@ -1675,7 +1686,7 @@ function [Sfine_final, maskFine_final, Scoarse, maskC] = Sfield_snapshot(dp_x_hi
 % rejected probe stays NaN and stays masked.
 %
 % Cost is unchanged -- one monodromy per grid point either way; the backward
-% pass is N cheap scalar steps against the monodromy's 5 trajectories.
+% pass is N cheap scalar steps against the monodromy's single trajectory.
 % InverseFullStep is an exact closed-form inverse (round trip measured at
 % 2.5e-10 px over 12 steps), so the recovered initial condition is exact.
 %
@@ -1708,15 +1719,21 @@ for iy = 1:ny
         end
 
         % ---- forward monodromy along that orbit ----
+        % The guard tests FINITENESS, not the determinant. det M = 1 holds by
+        % construction, so re-deriving it from the stored M only measures
+        % float64 cancellation -- the same defect the exact Jacobian removed.
+        % At N=40 that residual reaches 1.6e-2 on the most-stretched points,
+        % past DET_TOL, while S there is still exact to 0.0000%; testing it
+        % would throw away good measurements for a rounding artefact.
+        % Overflow is the one real failure mode and isfinite catches it.
         [M_raw, ~] = kd_dyn_vert('monodromy_with_final', y, x, t0, Nwin, ...
                                  dp_x_hist, Tau, H, W, row0, 1e-3, true);
-        [M_sym, det_raw] = kd_dyn_vert('symplectify2x2', M_raw, 5e-3);
 
-        if isempty(M_sym) || ~isfinite(det_raw) || abs(det_raw-1) > P.DET_TOL
+        if ~all(isfinite(M_raw(:)))
             continue;                 % stays NaN and unmasked -- a real mask
         end
 
-        Scoarse(iy,ix) = monodromy_to_Smax(M_sym);
+        Scoarse(iy,ix) = monodromy_to_Smax(M_raw);
         maskC(iy,ix)   = true;
     end
 end
@@ -1839,29 +1856,13 @@ theta = atan2(M(2,1) - M(1,2), M(1,1) + M(2,2));
 end
 
 
-% --------- Dynamics / FD monodromy backend (vertical-kick) ---------
+% --------- Dynamics / monodromy backend (vertical-kick) ---------
 function varargout = kd_dyn_vert(func, varargin)
 switch lower(func)
-    case 'symplectify2x2'
-        [varargout{1}, varargout{2}] = symplectify2x2(varargin{:});
     case 'monodromy_with_final'
         [varargout{1}, varargout{2}] = monodromy_with_final_vert(varargin{:});
     otherwise
         error('kd_dyn_vert:unknown', 'Unknown command "%s".', func);
-end
-end
-
-function [M_sym, det_raw] = symplectify2x2(M, det_tol)
-if nargin<2, det_tol=5e-3; end
-det_raw = det(M);
-if ~isfinite(det_raw) || det_raw <= 0.0
-    M_sym = [];
-    return;
-end
-if abs(det_raw - 1.0) <= det_tol
-    M_sym = M;
-else
-    M_sym = M ./ sqrt(det_raw);
 end
 end
 
@@ -1872,84 +1873,93 @@ fx=x-x0;
 dpy = dp_x(i0+1) + (dp_x(i1+1)-dp_x(i0+1))*fx;
 end
 
-function [M, xyNw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, symplectify_if, det_tol)
-if nargin<10 || isempty(eps_),           eps_ = 1e-3; end
-if nargin<11 || isempty(symplectify_if), symplectify_if = true; end
-if nargin<12 || isempty(det_tol),        det_tol = 5e-3; end
+function [M, xyNw] = monodromy_analytic_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0)
+% Exact monodromy by the chain rule. Replaces a 5-trajectory central
+% difference (base, +-eps in x, +-eps in y, eps = 1e-3 px).
+%
+% One step of the map is
+%     Yc = y + f(x)
+%     Xc = x + Tau*(Yc - row0)
+% so with fp = f'(x), in the (x,y) ordering the FD version used,
+%     J = [[1 + Tau*fp, Tau],
+%          [       fp,    1 ]]
+% and det J = (1 + Tau*fp)*1 - Tau*fp = 1 IDENTICALLY -- for every step, every
+% fp, every Tau. So det M = 1 to machine precision and the symplectic
+% structure is exact by construction rather than repaired afterwards.
+%
+% Why the finite difference had to go. M has entries of order sigma, and
+% det = M11*M22 - M12*M21 must come out to 1, so two numbers of size sigma^2
+% cancel to unity: the determinant loses ~2*log10(sigma) digits that the
+% entries never had to lose. Measured against this routine over 20,000 random
+% points (reference computed in 80-bit):
+%
+%   N    median|det-1|   det<=0 rejected   rescaled by symplectify   median S
+%   12       7.7e-10           0.7%                6.4%                 9.9
+%   25       1.5e-02          17.6%               34.6%                85.6
+%   40       1.7e+02          39.5%               48.2%               804.7
+%
+% The entries themselves stay good far longer than the determinant does --
+% sigma_max is a norm, a SUM of squares of the large entries, so it does not
+% cancel. Raw FD reproduced S to 0.00% median even at N=25. The damage came
+% from the repair: symplectify2x2 (since removed) divided M by sqrt(det)
+% whenever |det-1| > DET_TOL, and when det is 174 because of cancellation that
+% divides S by 13. With the rescaling applied, as the pipeline applies it, the error
+% in S against exact was
+%       N=12  median 0.00%, 99th pct 40%
+%       N=25  median 0.00%, 90th pct 89%
+%       N=40  median 85%
+% so the cure was doing the damage, driven by a determinant that was measuring
+% floating-point cancellation rather than anything about the dynamics.
+%
+% On the derivative. f is interp_kick_x, a LINEAR interpolant of dp_x, so its
+% exact derivative is the divided difference dp(i1) - dp(i0), constant across
+% each cell. That is deliberately NOT the spectral derivative of the
+% underlying smooth field: M must be the Jacobian of the map the trajectory
+% is actually advanced by, or it stops describing how neighbouring
+% trajectories of THIS system separate. The two differ by a median 0.84% in S
+% at N=12, 1.8% at N=25 and 2.9% at N=40 -- small, but a bias with no upside,
+% and using it would also mean carrying a second history array that could
+% fall out of step with dp_x_hist. The divided difference needs no new state
+% at all.
 
 T = numel(dp_hist);
-
 x = double(x0); y = double(y0);
+
+a = 1; b = 0;          % M = [a b ; c d], initialised to the identity
+c = 0; d = 1;
+
 for k = 0:(floor(N)-1)
     dp = dp_hist{mod(t0 + k, T) + 1};
-    Yc = y + interp_kick_x(x, dp);
-    Xc = x + Tau*(Yc - row0);
-    x = Xc; y = Yc;
-end
-xN0w = mod(x, cols); yN0w = mod(y, rows);
+    n  = numel(dp);
 
-x = double(x0) + eps_; y = double(y0);
-for k = 0:(floor(N)-1)
-    dp = dp_hist{mod(t0 + k, T) + 1};
-    Yc = y + interp_kick_x(x, dp);
-    Xc = x + Tau*(Yc - row0);
-    x = Xc; y = Yc;
-end
-xNxp = x; yNxp = y;
+    % value and exact slope of interp_kick_x at x, from one cell lookup
+    xf = floor(x); i0 = mod(xf, n); i1 = mod(i0 + 1, n);
+    d0 = dp(i0+1);
+    fp = dp(i1+1) - d0;
+    dpy = d0 + fp*(x - xf);
 
-x = double(x0) - eps_; y = double(y0);
-for k = 0:(floor(N)-1)
-    dp = dp_hist{mod(t0 + k, T) + 1};
-    Yc = y + interp_kick_x(x, dp);
-    Xc = x + Tau*(Yc - row0);
-    x = Xc; y = Yc;
-end
-xNxm = x; yNxm = y;
+    % M <- J*M
+    g  = 1 + Tau*fp;
+    a2 = g*a + Tau*c;   b2 = g*b + Tau*d;
+    c2 = fp*a + c;      d2 = fp*b + d;
+    a = a2; b = b2; c = c2; d = d2;
 
-x = double(x0); y = double(y0) + eps_;
-for k = 0:(floor(N)-1)
-    dp = dp_hist{mod(t0 + k, T) + 1};
-    Yc = y + interp_kick_x(x, dp);
-    Xc = x + Tau*(Yc - row0);
-    x = Xc; y = Yc;
-end
-xNyp = x; yNyp = y;
-
-x = double(x0); y = double(y0) - eps_;
-for k = 0:(floor(N)-1)
-    dp = dp_hist{mod(t0 + k, T) + 1};
-    Yc = y + interp_kick_x(x, dp);
-    Xc = x + Tau*(Yc - row0);
-    x = Xc; y = Yc;
-end
-xNym = x; yNym = y;
-
-col1 = [(xNxp - xNxm)/(2*eps_) ; (yNxp - yNxm)/(2*eps_)];
-col2 = [(xNyp - xNym)/(2*eps_) ; (yNyp - yNym)/(2*eps_)];
-M    = [col1, col2];
-
-if symplectify_if
-    detM = det(M);
-    if ~isfinite(detM) || detM <= 0.0
-        xyNw = [xN0w, yN0w];
-        return;
-    end
-    if abs(detM - 1.0) > det_tol
-        M = M ./ sqrt(detM);
-    end
+    % advance the trajectory with the same kick value
+    y = y + dpy;
+    x = x + Tau*(y - row0);
 end
 
-xyNw = [xN0w, yN0w];
+M    = [a, b; c, d];
+xyNw = [mod(x, cols), mod(y, rows)];
 end
 
 function [M, xyNw] = monodromy_with_final_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0, eps_, use_fd)
-if nargin<10, eps_=1e-3; end
-if nargin<11, use_fd=true; end
-if use_fd
-    [M, xyNw] = monodromy_N_fd_3_central_vert(x0, y0, t0, N, dp_hist, Tau, row0, cols, rows, eps_, true);
-else
-    error('This version uses FD monodromy. Set use_fd=true.');
-end
+% eps_ and use_fd are accepted so existing call sites keep working, and are
+% ignored: there is no step size to choose any more and nothing to switch
+% between. The monodromy is exact.
+if nargin < 10, eps_  = [];   end %#ok<NASGU>
+if nargin < 11, use_fd = true; end %#ok<NASGU>
+[M, xyNw] = monodromy_analytic_vert(y0, x0, t0, N, dp_hist, Tau, rows, cols, row0);
 end
 
 function [nBlobs, areas] = blob_stats_any(BW, conn)
