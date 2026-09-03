@@ -157,9 +157,19 @@ SParams.DEPOSIT_AT_FINAL = true;
 % 4 is chosen because blob MORPHOLOGY does need resolution: the S<=2 set at
 % N=12 has an autocorrelation length of ~15 px in log S, and a step-8 lattice
 % resolves only the components holding ~94% of the low area, a step-4 lattice
-% noticeably more. Raise it back to 8 if the run is area-only and tight on
-% time; do not raise it above ~8, which is already ~2 samples per correlation
-% length.
+% noticeably more.
+%
+% For the area fraction, step is a PRECISION knob, not an accuracy one. Over
+% 40 kick realisations the per-run scatter of the lattice fraction about that
+% run's own 1 px truth was
+%     step 2: 0.0002    step 8: 0.0015    step 32: 0.0110
+%     step 4: 0.0005    step 16: 0.0042
+% against a fraction of ~0.056, i.e. +-0.9% relative at step 4, +-2.7% at
+% step 8, +-20% at step 32 -- while the mean bias stayed under one standard
+% error at every one of them (largest |t| = 0.97). So choose step by the
+% precision the result needs; a single coarse run that lands far from the
+% truth is a wide draw, not a biased estimator, and averaging realisations
+% closes it. Raise it back to 8 if the run is area-only and tight on time.
 SParams.FIELD_STEP        = 4;     % coarsening for S-field evaluation (bigger = faster)
 % Smoothing is a DISPLAY choice and is applied in log S, to the display copy
 % only -- never to the values that get thresholded or counted. 0 disables it.
@@ -488,9 +498,6 @@ for it = 1:cycles
         % >=256 px hold 82%. Treat total/largest/top-k AREA as the physical
         % quantity and the bare COUNT as resolution- and threshold-sensitive.
         CC_low_meas = get_CC_full(blueC, SParams.BLOB_CONN);
-
-        % components of the DISPLAY mask, kept only to draw the blob overlay
-        CC_low_cycle = get_CC_full(blueMask, SParams.BLOB_CONN);
 
         if isempty(CC_low_meas)
             aLow_full = [];
@@ -860,9 +867,19 @@ for it = 1:cycles
             colormap(gca, cmap_blue_yellow); colorbar;
             apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
 
-            % blobs are OUTLINED from the display mask so the picture stays at
-            % full resolution, but the count quoted is the MEASURED one
-            nB_cyc = numel(CC_low_cycle);
+            % Everything about the blobs here -- the count in the title, the
+            % coloured patches, the numbering and the quoted areas -- comes
+            % from CC_low_meas, the components of the MEASURED lattice. Only
+            % the S heatmap and the S_THR contour behind them are display
+            % resolution.
+            %
+            % These were briefly two different sets: the title quoted the
+            % measured count while the overlay numbered the components of the
+            % full-resolution display mask, so the figure showed "N blobs" over
+            % several hundred numbered labels, with A_k in raw display pixels
+            % and never converted through cellArea. Same defect as counting the
+            % picture in the first place, just moved into the annotation.
+            nB_cyc = numel(CC_low_meas);
             title(sprintf(['cycle %d: s_1(x_N,y_N)  |  S_{THR}=%.1f  |  Nwin=%d  |  ' ...
                            '%d blobs measured at %d px  (%.3f of frame)'], ...
                           it, SParams.S_THR, Nw, n_low_blobs_fullres(it), ...
@@ -873,32 +890,38 @@ for it = 1:cycles
 
             % sort blobs by area (largest first) and overlay numbered labels
             if nB_cyc > 0
-                areas_cyc = cellfun(@numel, CC_low_cycle(:));
+                step_c = SParams.FIELD_STEP;
+                areas_cyc = cellfun(@numel, CC_low_meas(:));      % lattice cells
                 [areas_sorted, sort_idx] = sort(areas_cyc, 'descend');
                 cmap_blobs_cyc = lines(max(nB_cyc,1));
-                [Hc, Wc] = size(maskFine_final);
+                [Hc, Wc] = size(blueC);                           % lattice dims
 
-                % build a single label image: pixel value = blob rank (1..nB_cyc)
+                % build a single label image: cell value = blob rank (1..nB_cyc)
                 if nB_cyc < 65535
                     label_img = zeros(Hc, Wc, 'uint16');
                 else
                     label_img = zeros(Hc, Wc, 'uint32');
                 end
                 for k = 1:nB_cyc
-                    label_img(CC_low_cycle{sort_idx(k)}) = k;
+                    label_img(CC_low_meas{sort_idx(k)}) = k;
                 end
                 blob_mask_all = label_img > 0;
                 rgb_overlay = ind2rgb(label_img, [0 0 0; cmap_blobs_cyc]);
-                hBk = image(rgb_overlay);
+                % lattice image over a full-resolution axis: place it on the
+                % pixels it represents, as fig 7001 does
+                hBk = image(rgb_overlay, ...
+                            'XData', [1, (Wc-1)*step_c + 1], ...
+                            'YData', [1, (Hc-1)*step_c + 1]);
                 set(hBk,'AlphaData', 0.35 * double(blob_mask_all));
                 clear rgb_overlay label_img blob_mask_all;
 
                 % numbered text labels at each blob centroid
                 for k = 1:nB_cyc
-                    idx_lin_k = CC_low_cycle{sort_idx(k)};
+                    idx_lin_k = CC_low_meas{sort_idx(k)};
                     [ry_k, rx_k] = ind2sub([Hc Wc], idx_lin_k);
-                    cx_k = mean(rx_k);  cy_k = mean(ry_k);
-                    A_k  = areas_sorted(k);
+                    cx_k = (mean(rx_k)-1)*step_c + 1;   % lattice -> pixel
+                    cy_k = (mean(ry_k)-1)*step_c + 1;
+                    A_k  = areas_sorted(k) * cellArea;  % cells -> px^2
                     r_eq_k = sqrt(A_k / pi);
                     text(cx_k, cy_k, ...
                          sprintf('#%d\n%dpx\nr=%.1f', k, A_k, r_eq_k), ...
@@ -971,9 +994,14 @@ for it = 1:cycles
         mask_prev_final = maskFine_final;
 
         % MEMORY: drop this cycle's heavy temporaries before the next
-        % iteration allocates its own. CC_low_cycle in particular holds one
-        % index list per low-stretch component at full resolution.
-        clear CC_low_cycle blueMask yellowMask
+        % iteration allocates its own.
+        %
+        % CC_low_cycle used to be built here too -- a second get_CC_full over
+        % the full-resolution blueMask, holding one index list per component
+        % at 1920x1920. Once the figure labels the measured components it has
+        % no reader, so the pass is gone rather than merely freed; CC_low_meas
+        % does the same job on the lattice at 1/FIELD_STEP^2 the size.
+        clear blueMask yellowMask
 
     end
 end
@@ -1188,15 +1216,17 @@ title(sprintf('Linearized decay: log(A) vs N | tau = %.3f in units of N', tauA))
 xlim([cStar cycles]);
 
 % Figure 6501 used to repeat this fit on total_low_blob_area_px_fullres.
-% That series is sum(cellfun(@numel, CC_low_cycle)), and get_CC_full applies
-% no size filter, so the components partition blueMask exactly and the sum is
-% identically nnz(blueMask) = area_blue_px. It was the same fit on the same
-% numbers in a second window. Asserted here so that if a size filter is ever
-% added the two stop being interchangeable loudly rather than silently.
+% That series is sum(cellfun(@numel, CC_low_meas)) * cellArea, and
+% get_CC_full applies no size filter, so the components partition blueC
+% exactly and the sum is identically nnz(blueC)*cellArea = area_blue_px. It
+% was the same fit on the same numbers in a second window. Asserted here so
+% that if a size filter is ever added -- a reasonable thing to want, given
+% how many components are single cells -- the two stop being interchangeable
+% loudly rather than silently.
 assert(all(isnan(total_low_blob_area_px_fullres) | ...
            total_low_blob_area_px_fullres == area_blue_px), ...
        ['total_low_blob_area_px_fullres has diverged from area_blue_px; ' ...
-        'the blob decomposition no longer partitions blueMask.']);
+        'the blob decomposition no longer partitions blueC.']);
 
 fprintf('Low-stretch area fit: A = %.6e * exp(%.6f * N), tau = %.6f in window length N\n', ...
         A0A, kA, tauA);
@@ -1722,10 +1752,15 @@ end
 % Sampling itself is NOT the problem. The fraction of lattice points with
 % S <= thr is an unbiased estimator of the area fraction of {S <= thr} for a
 % statistically homogeneous field: coarsening adds variance, never bias.
-% Measured bias against the 1 px truth over 8 kick realisations:
-%     step 16: -0.00038 (sd 0.00384)      step 4: -0.00013 (sd 0.00064)
-%     step  8: -0.00010 (sd 0.00124)      step 2: +0.00001 (sd 0.00028)
-% every one an order of magnitude below its own sampling noise. So the
+% Measured bias against the 1 px truth over 40 kick realisations, as
+% mean +- standard error of the mean:
+%     step  2: -0.00003 +- 0.00003    step 16: -0.00038 +- 0.00066
+%     step  4: -0.00008 +- 0.00008    step 32: +0.00084 +- 0.00175
+%     step  8: -0.00016 +- 0.00024
+% |t| < 1 at every step, so none of them is distinguishable from zero -- step
+% 32 included, where a single run can land 0.011 away and look like a
+% breakdown while the ensemble mean sits at +0.0008. Coarsening costs
+% precision, not accuracy. So the
 % headline area fraction is correct at ANY FIELD_STEP once it is taken from
 % Scoarse; step size buys precision and blob morphology, not accuracy.
 
