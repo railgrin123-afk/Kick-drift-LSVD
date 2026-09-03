@@ -246,6 +246,17 @@ max_yellow_blob_area_px  = nan(cycles,1);
 % count is not, so read it as bookkeeping rather than as physics.
 TOPK_LOW_BLOBS = 5;
 
+% How many blobs get a text label on the blob figures, and how many rows the
+% console table prints. Both figures used to label every component and the
+% table printed every row. At FIELD_STEP = 1 that is ~5,700 three-line text
+% objects with background boxes per figure, drawn on top of each other and
+% mostly reading "#5213 / 1px / r=0.6", plus ~5,700 lines of console fprintf
+% per run. Blobs are ranked by area, so the first few carry essentially all
+% of it (the 13 largest hold 82%); the rest are threshold specks.
+% blob_summary.txt still gets every row -- only the screen is capped.
+TOPK_BLOB_LABELS  = 20;    % text labels drawn on figs 7001 and 8000
+TOPN_BLOB_CONSOLE = 50;    % rows printed to the console table
+
 n_low_blobs_fullres              = nan(cycles,1);
 total_low_blob_area_px_fullres   = nan(cycles,1);
 largest_low_blob_area_px_fullres = nan(cycles,1);
@@ -889,9 +900,11 @@ for it = 1:cycles
             % picture in the first place, just moved into the annotation.
             nB_cyc = numel(CC_low_meas);
             title(sprintf(['cycle %d: s_1(x_N,y_N)  |  S_{THR}=%.1f  |  Nwin=%d  |  ' ...
-                           '%d blobs measured at %d px  (%.3f of frame)'], ...
+                           '%d blobs measured at %d px  (%.3f of frame)  |  ' ...
+                           '%d largest labelled'], ...
                           it, SParams.S_THR, Nw, n_low_blobs_fullres(it), ...
-                          SParams.FIELD_STEP, frac_blue(it)));
+                          SParams.FIELD_STEP, frac_blue(it), ...
+                          min(n_low_blobs_fullres(it), TOPK_BLOB_LABELS)));
             hold on;
             % S=S_THR boundary
             contour(Sfine_final, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth', 1.5);
@@ -923,8 +936,13 @@ for it = 1:cycles
                 set(hBk,'AlphaData', 0.35 * double(blob_mask_all));
                 clear rgb_overlay label_img blob_mask_all;
 
-                % numbered text labels at each blob centroid
-                for k = 1:nB_cyc
+                % numbered text labels on the largest blobs only. Every
+                % component still gets its coloured patch above -- that is one
+                % image call -- but a text object per component means ~5,700
+                % three-line labels with background boxes stacked on top of
+                % each other at FIELD_STEP = 1, most of them reading "1px".
+                nLab = min(nB_cyc, TOPK_BLOB_LABELS);
+                for k = 1:nLab
                     idx_lin_k = CC_low_meas{sort_idx(k)};
                     [ry_k, rx_k] = ind2sub([Hc Wc], idx_lin_k);
                     cx_k = (mean(rx_k)-1)*step_c + 1;   % lattice -> pixel
@@ -1342,8 +1360,20 @@ for k = 1:nF
     % perimeter-based compactness  C = 4*pi*A / P^2.
     % Computed in lattice units and left there: under a change of scale
     % A -> A*s^2 and P -> P*s, so C is scale-invariant and needs no conversion.
-    BW_blob = false(H_im, W_im);
-    BW_blob(idx_lin) = true;
+    %
+    % Cropped to the blob's bounding box. This used to allocate a full
+    % H_im x W_im logical per blob and run four full-frame comparisons over
+    % it. At FIELD_STEP = 1 that is a 3.7 MB allocation plus ~15 MB of traffic
+    % for every component, and by cycle 12 there are ~5,700 of them, 60% being
+    % a single pixel whose perimeter is 4. compute_perimeter pads with
+    % background on all four sides, so the pixels just outside the box read as
+    % background either way and the crop is exactly equivalent -- verified
+    % over 3,000 random blobs including ones touching the frame edge, zero
+    % mismatches. Cost now scales with the blob, not with the frame.
+    r0 = min(ry); r1 = max(ry);
+    c0 = min(rx); c1 = max(rx);
+    BW_blob = false(r1-r0+1, c1-c0+1);
+    BW_blob(sub2ind(size(BW_blob), ry-r0+1, rx-c0+1)) = true;
     P = compute_perimeter(BW_blob);
     if P > 0
         blob_compact(k) = 4*pi*A_cell / P^2;
@@ -1375,12 +1405,20 @@ fprintf('  Number of blobs     : %d\n\n', nF);
 fprintf('  %-5s  %-9s  %-7s  %-7s  %-7s  %-6s  %-9s\n', ...
     'Rank','Area(px)','Frac','Cx','Cy','r_eq','Compact');
 fprintf('  %s\n', repmat('-',1,60));
-for k = 1:nF
+nShow = min(nF, TOPN_BLOB_CONSOLE);
+for k = 1:nShow
     fprintf('  %-5d  %-9d  %.4f  %-7.1f  %-7.1f  %-6.2f  %.4f\n', ...
             k, blob_area(k), blob_frac(k), ...
             blob_cx(k), blob_cy(k), blob_r_eq(k), blob_compact(k));
 end
+if nF > nShow
+    fprintf('  ... %d smaller blob(s) not shown; full table in blob_summary.txt\n', ...
+            nF - nShow);
+    fprintf('      (shown blobs hold %.4f of the valid field, all blobs %.4f)\n', ...
+            sum(blob_frac(1:nShow)), sum(blob_frac));
+end
 fprintf('  %s\n', repmat('-',1,60));
+% totals stay over ALL blobs, not just the printed ones
 fprintf('  Total low-stretch blob area : %d px  (%.4f of valid field)\n', ...
         sum(blob_area), sum(blob_frac));
 fprintf('=============================================================\n\n');
@@ -1424,8 +1462,9 @@ set(hIm,'AlphaData', double(maskFin));
 axis image off;
 colormap(gca, cmap_blue_yellow); colorbar;
 apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
-title(sprintf('Final s_1(x_N,y_N)  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs  [FINAL location]', ...
-              SParams.S_THR, Nw_fin, nF));
+title(sprintf(['Final s_1(x_N,y_N)  |  S_{THR}=%.1f  |  Nwin=%d  |  %d blobs  ' ...
+               '(%d largest labelled)  [FINAL location]'], ...
+              SParams.S_THR, Nw_fin, nF, min(nF, TOPK_BLOB_LABELS)));
 hold on;
 % draw S=S_THR boundary
 contour(Sfin, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth',1.5);
@@ -1452,7 +1491,8 @@ if nF > 0
     set(hB_fin,'AlphaData', 0.35 * double(blob_mask_fin));
     clear rgb_overlay_fin label_img_fin blob_mask_fin;
 
-    for k = 1:nF
+    % labels on the largest blobs only; all of them keep their patch
+    for k = 1:min(nF, TOPK_BLOB_LABELS)
         text(blob_cx(k), blob_cy(k), ...
              sprintf('#%d\n%dpx\nr=%.1f', k, blob_area(k), blob_r_eq(k)), ...
              'Color','w','FontSize',7,'FontWeight','bold', ...
