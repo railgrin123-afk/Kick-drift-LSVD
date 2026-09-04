@@ -190,6 +190,45 @@ SParams.S_CLIP_MAX        = 15;    % color scale upper cap for display (logarith
 % Contours: to avoid spaghetti, default is ONLY the threshold contour S=2
 SParams.SHOW_ONLY_THR_CONTOUR = true;
 
+% -------------------- ZOOM PROBE GRIDS --------------------
+% A fixed lattice of probe points over a chosen window. Each probe measures S
+% exactly at its own position and is drawn in its S band's colour; probes whose
+% S falls in no band (S > 3.0, or a rejected monodromy) are not drawn at all.
+%
+% The lattice is REGULAR, with no jitter. Smap_dots_snapshot deliberately
+% jitters its probes by JITTER_FR of the pitch, which is right for an unbiased
+% estimate over the whole frame -- an unjittered lattice can beat against
+% structure in S -- but wrong for reading a specific region, where you want the
+% same points every cycle so two cycles can be compared dot for dot.
+ZOOM.ENABLE = true;
+
+% One row per window: [row0 col0 height width], 1-based pixel coordinates of
+% the displayed frame. height/width ARE the zoom resolution (400 400 = a
+% 400x400 px region). Windows may run off the edge; they wrap on the torus.
+ZOOM.WINDOWS = [ 761  761  400  400 ; ...
+                 200 1200  400  400 ];
+
+% Probe spacing in pixels: 1 = every pixel in the window, 2 = every other, 4,
+% 8, ... Cost is (height*width)/SPACING^2 monodromies per window per cycle:
+% 400x400 at spacing 1 is 160,000, about 4% of one full-frame S-field sweep.
+ZOOM.SPACING = 2;
+
+ZOOM.MARKER     = 12;      % dot size in points
+ZOOM.SHOW_IMAGE = true;    % draw the kick-drift frame behind the dots
+
+% ---- DOT colours, one per S band (see dot_band_index for the bands) ----
+% Hoisted out of the per-cycle loop: these are constants, and the zoom probe
+% figures need them too.
+dot_cmap = [...
+    0.00 1.00 1.00;   % 1: cyan            (S < 1.5)
+    0.40 1.00 0.00;   % 2: lime green      (1.5 <= S < 1.8)
+    1.00 0.65 0.00;   % 3: neon orange     (1.8 <= S <= 2.0)
+    0.55 0.27 0.07;   % 4: brown           (2.0 <  S <= 2.2)
+    1.00 0.00 0.00;   % 5: bright red      (2.2 <  S <  2.5)
+    0.00 0.70 0.80];  % 6: teal            (2.5 <= S <= 3.0)
+dot_band_labels = {'S < 1.5','1.5 - 1.8','1.8 - 2.0', ...
+                   '2.0 - 2.2','2.2 - 2.5','2.5 - 3.0'};
+
 % Custom colormap: dark cyan -> teal -> yellow
 nCmap = 256;
 t = linspace(0, 1, nCmap)';
@@ -637,21 +676,6 @@ for it = 1:cycles
             0.80 0.93 0.93;   % 11: eggshell blue    3.5<S<=4.0
             0.72 0.53 0.04];  % 12: deep goldenrod   S>4.0
 
-        % ---- DOT colors (one per band) - chosen to contrast with band bg ----
-        %  1: S<1.5            cyan
-        %  2: 1.5<=S<1.8       lime green
-        %  3: 1.8<=S<2.0       neon orange (brighter)
-        %  4: 2.0<S<=2.2       brown
-        %  5: 2.2<S<2.5        bright red
-        %  6: 2.5<=S<=3.0      teal
-        dot_cmap = [...
-            0.00 1.00 1.00;   % 1: cyan            (S<1.5)
-            0.40 1.00 0.00;   % 2: lime green      (1.5<=S<1.8)
-            1.00 0.65 0.00;   % 3: neon orange     (1.8<=S<2.0)
-            0.55 0.27 0.07;   % 4: brown           (2.0<S<=2.2)
-            1.00 0.00 0.00;   % 5: bright red      (2.2<S<2.5)
-            0.00 0.70 0.80];  % 6: teal            (2.5<=S<=3.0)
-
         % The colour definitions are constant, so save them only once.
         if it == 1
             visualization = struct();
@@ -1029,6 +1053,29 @@ for it = 1:cycles
         % does the same job on the lattice at 1/FIELD_STEP^2 the size.
         clear blueMask yellowMask
 
+    end
+
+    % ============ FIGURE: ZOOM PROBE GRIDS ============
+    % One figure per window, gated only by ZOOM.ENABLE: the probes are
+    % measured directly at their own positions, so this needs neither the
+    % dot pipeline nor the S-field lattice and stays exact whatever
+    % FIELD_STEP is set to.
+    if ZOOM.ENABLE && ~isempty(ZOOM.WINDOWS)
+        for wIdx = 1:size(ZOOM.WINDOWS, 1)
+            [nKeptZ, figZ] = zoom_probe_figure( ...
+                fignum(9000 + 100*wIdx, it, KEEP_FIGS_PER_CYCLE), ...
+                sprintf('Cycle %d: zoom probe grid %d', it, wIdx), ...
+                stage2_img, ZOOM.WINDOWS(wIdx,:), ZOOM, ...
+                dp_x_hist, row0, Tau, rows, cols, t0_recent, Nw, ...
+                dot_cmap, dot_band_labels, ...
+                sprintf('cycle %d zoom %d', it, wIdx));
+
+            save_cycle_figure(figZ, sprintf("zoom_probes_w%d", wIdx), it);
+            fprintf('  zoom %d: %d of %d probes in band (spacing %d px)\n', ...
+                    wIdx, nKeptZ, ...
+                    numel(1:ZOOM.SPACING:ZOOM.WINDOWS(wIdx,3)) * ...
+                    numel(1:ZOOM.SPACING:ZOOM.WINDOWS(wIdx,4)), ZOOM.SPACING);
+        end
     end
 end
 
@@ -1507,6 +1554,80 @@ fprintf('All figures generated.  blob_summary.txt written.\n');
 
 % ====================== Local functions (end of file) ======================
 
+function [nKept, fig] = zoom_probe_figure(figNo, figName, frameImg, win, ZOOM, ...
+                                   dp_hist, row0, Tau, H, W, t0, Nw, ...
+                                   dot_cmap, dot_band_labels, titleExtra)
+% Fixed-lattice probe map over one zoom window.
+%
+% Probes sit on a regular ZOOM.SPACING lattice inside the window -- the same
+% screen positions every cycle and every run. S is measured exactly at each
+% probe (backward integration to the initial condition, then the forward
+% monodromy, via the same S_at_final_positions the S-field lattice uses), so
+% nothing here is read off an interpolated field.
+%
+% A probe is drawn only if dot_band_index puts it in a band, i.e. only if
+% S <= 3.0. Everything above that, and any non-finite S, is simply absent --
+% which is the point: what remains is the set meeting the criterion.
+
+r0 = win(1); c0 = win(2); hgt = win(3); wid = win(4);
+
+ry = r0 : ZOOM.SPACING : (r0 + hgt - 1);
+cx = c0 : ZOOM.SPACING : (c0 + wid - 1);
+[CX, RY] = meshgrid(cx, ry);
+
+% 1-based display coords -> 0-based dynamics coords, wrapped onto the torus
+% so a window may straddle the frame edge
+S = S_at_final_positions(mod(RY(:)-1, H), mod(CX(:)-1, W), ...
+                         t0, Nw, dp_hist, Tau, row0);
+
+band  = dot_band_index(S);
+nKept = nnz(band > 0);
+
+% window-local coordinates, so the axes read 1..wid and 1..hgt
+xloc = CX(:) - c0 + 1;
+yloc = RY(:) - r0 + 1;
+
+fig = figure(figNo); clf;
+set(fig, 'Color','w', 'Position',[80 60 950 950], 'Name', figName);
+
+if ZOOM.SHOW_IMAGE && ~isempty(frameImg)
+    rr = mod((r0 : r0+hgt-1) - 1, H) + 1;
+    cc = mod((c0 : c0+wid-1) - 1, W) + 1;
+    imshow(frameImg(rr, cc, :), []);
+    hold on;
+else
+    hold on;
+    axis ij image;
+    xlim([0.5, wid+0.5]);  ylim([0.5, hgt+0.5]);
+    set(gca, 'Color', [0.12 0.12 0.12]);
+end
+
+hLeg = gobjects(0);  lblLeg = {};
+for b = 1:size(dot_cmap,1)
+    sel = (band == b);
+    if any(sel)
+        h = plot(xloc(sel), yloc(sel), '.', ...
+                 'MarkerSize', ZOOM.MARKER, 'Color', dot_cmap(b,:));
+        hLeg(end+1)   = h;                          %#ok<AGROW>
+        lblLeg{end+1} = sprintf('%s  (n=%d)', ...
+                                dot_band_labels{b}, nnz(sel));  %#ok<AGROW>
+    end
+end
+
+axis image off;
+if ~isempty(hLeg)
+    legend(hLeg, lblLeg, 'Location','eastoutside', 'FontSize', 9, ...
+           'TextColor', [0 0 0]);
+end
+
+title(sprintf(['%s  |  window [r %d-%d, c %d-%d]  %dx%d px  |  ' ...
+               'spacing %d px  |  %d of %d probes in band'], ...
+              titleExtra, r0, r0+hgt-1, c0, c0+wid-1, hgt, wid, ...
+              ZOOM.SPACING, nKept, numel(S)));
+hold off;
+drawnow;
+end
+
 function F = randpot1d_getFFT(c)
     f = fft(ifftshift(c(:).'));
     F = complex(sqrt(abs(f)),0);
@@ -1731,7 +1852,6 @@ ny = numel(ys); nx = numel(xs);
 
 Scoarse = nan(ny, nx);
 maskC   = false(ny, nx);
-T       = numel(dp_x_hist);
 Nw      = floor(Nwin);
 
 % ---- blocked vectorised sweep over the lattice ----
@@ -1760,27 +1880,15 @@ for p0 = 1:blk:nTot
     y  = iy * step;
     x  = ix * step;
 
-    % ---- exact backward integration to the initial condition ----
-    % undoing  Yc = y + dp(x);  Xc = x + Tau*(Yc - row0)
-    for k = Nw-1 : -1 : 0
-        dp = dp_x_hist{mod(t0 + k, T) + 1};
-        n  = numel(dp);
-        x  = x - Tau*(y - row0);
-        xf = floor(x);
-        i0 = mod(xf, n);
-        d0 = dp(i0+1);
-        y  = y - (d0 + (dp(mod(i0+1, n)+1) - d0) .* (x - xf));
-    end
-
-    % ---- forward monodromy along that orbit ----
-    % The guard tests FINITENESS, not the determinant. det M = 1 holds by
-    % construction, so re-deriving it from the stored M only measures
+    % ---- backward to the initial condition, then forward monodromy ----
+    % The guard below tests FINITENESS, not the determinant. det M = 1 holds
+    % by construction, so re-deriving it from the stored M only measures
     % float64 cancellation -- the same defect the exact Jacobian removed.
     % At N=40 that residual reaches 1.6e-2 on the most-stretched points,
     % past DET_TOL, while S there is still exact to 0.0000%; testing it
     % would throw away good measurements for a rounding artefact.
     % Overflow is the one real failure mode and isfinite catches it.
-    Sblk = monodromy_S_vec(y, x, t0, Nwin, dp_x_hist, Tau, row0);
+    Sblk = S_at_final_positions(y, x, t0, Nw, dp_x_hist, Tau, row0);
 
     ok = isfinite(Sblk);
     Scoarse(idx(ok)) = Sblk(ok);
@@ -1912,6 +2020,31 @@ n = numel(dp_x);
 x0=floor(x); i0=mod(x0,n); i1=mod(i0+1,n);
 fx=x-x0;
 dpy = dp_x(i0+1) + (dp_x(i1+1)-dp_x(i0+1))*fx;
+end
+
+function S = S_at_final_positions(y, x, t0, Nw, dp_hist, Tau, row0)
+% S for points given by their FINAL (current) positions: integrate each point
+% BACKWARD Nw steps to its initial condition, then run the forward monodromy
+% along that orbit. Vectorised over a column of points.
+%
+% Shared by the S-field lattice sweep and the zoom probe grids so that both
+% measure S the same way -- exactly, at the point asked for, with nothing
+% interpolated from a field.
+T = numel(dp_hist);
+y = double(y(:)); x = double(x(:));
+
+% undoing  Yc = y + dp(x);  Xc = x + Tau*(Yc - row0)
+for k = Nw-1 : -1 : 0
+    dp = dp_hist{mod(t0 + k, T) + 1};
+    n  = numel(dp);
+    x  = x - Tau*(y - row0);
+    xf = floor(x);
+    i0 = mod(xf, n);
+    d0 = dp(i0+1);
+    y  = y - (d0 + (dp(mod(i0+1, n)+1) - d0) .* (x - xf));
+end
+
+S = monodromy_S_vec(y, x, t0, Nw, dp_hist, Tau, row0);
 end
 
 function [S, xN, yN] = monodromy_S_vec(y0, x0, t0, N, dp_hist, Tau, row0)
@@ -2210,10 +2343,30 @@ function perim = compute_perimeter(BW)
     perim = sum(exposed(:));
 end
 
-function plot_banded_dots(xyAll, sAll, dot_cmap)
+function band = dot_band_index(dot_S)
+% THE DOT CRITERION, in one place. Six bands spanning 0 <= S <= 3.0; anything
+% above 3.0, and any NaN, returns 0 and is not drawn at all. That is what
+% makes a probe "disappear" rather than take a colour.
+%
+% Band 3 used to read (dot_S >= 1.8 & dot_S < 2.0) while band 4 read
+% (dot_S > 2.0), so a probe measuring exactly S = 2.0 fell in no band and
+% vanished. Measure-zero in floating point, but 2.0 is S_THR itself, and
+% everywhere else in this script S <= S_THR counts as low-stretch, so the
+% closed end belongs on band 3.
+dot_S = dot_S(:);
+band  = zeros(numel(dot_S), 1);
+band(dot_S <  1.5)                        = 1;
+band(dot_S >= 1.5 & dot_S <  1.8)         = 2;
+band(dot_S >= 1.8 & dot_S <= 2.0)         = 3;
+band(dot_S >  2.0 & dot_S <= 2.2)         = 4;
+band(dot_S >  2.2 & dot_S <  2.5)         = 5;
+band(dot_S >= 2.5 & dot_S <= 3.0)         = 6;
+end
+
+function plot_banded_dots(xyAll, sAll, dot_cmap, markerSize)
 % xyAll    - [N x 2] dot positions [x y] (1-based pixel coords)
 % sAll     - [N x 1] the S value MEASURED at each dot
-% dot_cmap - 12x3 RGB table, one row per band
+% dot_cmap - 6x3 RGB table, one row per band
 %
 % sAll used to be the interpolated S-field, and each dot's colour was looked
 % up from it at the dot's position. That discarded the value actually
@@ -2222,24 +2375,15 @@ function plot_banded_dots(xyAll, sAll, dot_cmap)
 % dropped. Colours now come from the measurement.
 
 if isempty(xyAll) || isempty(sAll), return; end
+if nargin < 4 || isempty(markerSize), markerSize = 10; end
 
-N = size(xyAll, 1);
-dot_S = sAll(:);
+band = dot_band_index(sAll);
 
-% Only 6 selected ranges get dots; everything else (S>=3.0 and NaN) is skipped.
-band = zeros(N, 1);
-band(dot_S <  1.5)                        = 1;
-band(dot_S >= 1.5 & dot_S <  1.8)         = 2;
-band(dot_S >= 1.8 & dot_S <  2.0)         = 3;
-band(dot_S >  2.0 & dot_S <= 2.2)         = 4;
-band(dot_S >  2.2 & dot_S <  2.5)         = 5;
-band(dot_S >= 2.5 & dot_S <= 3.0)         = 6;
-
-for b = 1:6
+for b = 1:size(dot_cmap,1)
     sel = (band == b);
     if any(sel)
         plot(xyAll(sel,1), xyAll(sel,2), '.', ...
-             'MarkerSize', 10, 'Color', dot_cmap(b,:));
+             'MarkerSize', markerSize, 'Color', dot_cmap(b,:));
     end
 end
 end
