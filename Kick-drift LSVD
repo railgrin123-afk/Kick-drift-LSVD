@@ -272,8 +272,37 @@ ZOOM.SHOW_IMAGE = true;    % draw the kick-drift frame behind the dots
 % Cost is one map step per cycle over the lattice -- the running monodromy
 % means it never re-integrates history -- so this is negligible next to the
 % S-field sweep.
-HAZ.ENABLE = true;
-HAZ.STEP   = 2;    % IC lattice spacing in px (2 -> 960x960 tracers, ~44 MB)
+% This lattice is the LAGRANGIAN field. It is seeded once on a regular grid of
+% initial conditions and accumulated forward, so S is indexed by SEED position
+% and the same array element means the same parcel at every cycle. Stored as
+% cycleData.S_start and overlaid on img0.
+%
+% It does NOT replace Sfield_snapshot, and neither can be derived from the
+% other. The Lagrangian sweep does carry each parcel's final position, so the
+% Eulerian field is in principle "that data re-addressed" -- but those final
+% positions are a scattered filamentary cloud, and resampling a scattered
+% cloud onto a regular grid means interpolating, which is exactly the pipeline
+% that was deleting 85% of the low-stretch set. Getting a regular grid of
+% CURRENT positions without interpolating requires starting on that grid and
+% integrating backward. So: both, always.
+%
+%   S_start   seed position    overlay img0         same-parcel statistics
+%   S_now     final position   overlay stage2_img   where the material is now
+%
+% What actually needs S_start is narrower than it looks. Measured on a 960^2
+% seed lattice over 12 cycles and 5 kick realisations, the two framings agree
+% on the low-stretch AREA FRACTION to within 0.0062 worst case -- they must,
+% since the map is area preserving -- and their coherence lengths converge
+% (74.1 vs 65.2 px at N=1, 17.0 vs 17.7 px at N=12). So the survival curve and
+% xi do not need it. What genuinely does is the HAZARD, which asks whether the
+% SAME parcel left the low-stretch set, a question no Eulerian field can
+% answer because a fixed pixel holds different material each cycle.
+%
+% Memory: 6 state arrays plus one stored field per cycle. At STEP = 2 that is
+% ~44 MB of state and ~44 MB of storage for 12 cycles. STEP = 1 is exact but
+% costs 177 MB + 177 MB, which this script has historically not had spare.
+LAG.ENABLE = true;
+LAG.STEP   = 2;    % seed lattice spacing in px (2 -> 960x960 parcels)
 
 % -------------------- COHERENCE LENGTH --------------------
 % xi(N): the separation at which the spatial autocorrelation of log S falls to
@@ -378,6 +407,11 @@ top5_low_blob_area_px_fullres    = nan(cycles,1);
 
 low_blob_rank_area_px_fullres = nan(cycles, TOPK_LOW_BLOBS);
 
+% Every blob's area, per cycle, for the distribution figure. Only aggregate
+% statistics were kept before, which cannot show a distribution spanning 3-5
+% decades. Cheap: a few thousand doubles per cycle.
+blob_area_history = cell(cycles,1);
+
 % -------------------- ADD-ON: store full SVD of monodromy --------------------
 
 cycleData = matfile("full_cycle_data.mat", "Writable", true);
@@ -421,7 +455,7 @@ runMetadata.SParams = SParams;
 runMetadata.ZOOM = ZOOM;
 
 % Hazard tracers and coherence length
-runMetadata.HAZ = HAZ;
+runMetadata.LAG = LAG;
 runMetadata.XI  = XI;
 
 % Display switches
@@ -475,15 +509,24 @@ xi_x      = nan(cycles,1);
 xi_y      = nan(cycles,1);
 xi_R2     = nan(cycles,1);   % quality of the exponential description
 
-if HAZ.ENABLE
-    [tHX, tHY] = meshgrid(0:HAZ.STEP:cols-1, 0:HAZ.STEP:rows-1);
+xi_start  = nan(cycles,1);   % coherence length of the SEED-indexed field
+lag_valid = false(cycles,1); % was t0 still pinned at 0 for this cycle?
+
+if LAG.ENABLE
+    lag_ys = 0:LAG.STEP:rows-1;
+    lag_xs = 0:LAG.STEP:cols-1;
+    lag_ny = numel(lag_ys);  lag_nx = numel(lag_xs);
+    [tHX, tHY] = meshgrid(lag_xs, lag_ys);
     tr_x = double(tHX(:));            tr_y = double(tHY(:));
     clear tHX tHY
     tr_a = ones(size(tr_x));          tr_b = zeros(size(tr_x));
     tr_c = zeros(size(tr_x));         tr_d = ones(size(tr_x));
     tr_lowPrev = [];
-    fprintf('Hazard tracers: %d initial conditions at %d px spacing.\n', ...
-            numel(tr_x), HAZ.STEP);
+    cycleData.S_start(lag_ny, lag_nx, cycles) = single(0);
+    fprintf(['Lagrangian accumulator: %d parcels at %d px seed spacing ' ...
+             '(%d x %d), ~%.0f MB state + %.0f MB stored.\n'], ...
+            numel(tr_x), LAG.STEP, lag_ny, lag_nx, ...
+            6*numel(tr_x)*8/1e6, lag_ny*lag_nx*cycles*4/1e6);
 end
 
 for it = 1:cycles
@@ -497,7 +540,7 @@ for it = 1:cycles
     % analysis window still starts at t0 = 0, i.e. while it <= Nwin; past that
     % the field's window slides and the tracers no longer describe it, which
     % is why the hazard figure stops at min(cycles, Nwin).
-    if HAZ.ENABLE
+    if LAG.ENABLE
         nk_ = numel(dp_x);
         xf_ = floor(tr_x);
         i0_ = mod(xf_, nk_);
@@ -514,8 +557,39 @@ for it = 1:cycles
         clear xf_ i0_ d0_ fp_ g_ a2_ b2_
 
         tt_    = tr_a.^2 + tr_b.^2 + tr_c.^2 + tr_d.^2;
-        lowNow_ = ((sqrt(tt_+2) + sqrt(max(tt_-2,0)))/2) <= SParams.S_THR;
+        S_lag_ = (sqrt(tt_+2) + sqrt(max(tt_-2,0))) / 2;
         clear tt_
+        lowNow_ = S_lag_ <= SParams.S_THR;
+
+        % The accumulator's M covers kicks 1..it, which is the window
+        % Sfield_snapshot uses only while t0 stays pinned at 0. Past that the
+        % field's window slides and the accumulator is measuring different
+        % kicks. Rather than abort a long run, the affected cycles are marked
+        % invalid and everything downstream skips them -- loud in the log and
+        % in the data, without destroying the Eulerian output, which stays
+        % correct throughout.
+        lag_valid(it) = (it <= SParams.Nwin);
+        if ~lag_valid(it) && it == SParams.Nwin + 1
+            warning(['S_start accumulator is only valid while t0 = 0 ' ...
+                     '(cycles 1-%d). Later cycles are recorded as NaN; ' ...
+                     'reseed each cycle if you need a sliding window.'], ...
+                    SParams.Nwin);
+        end
+
+        if lag_valid(it)
+            cycleData.S_start(:,:,it) = reshape(single(S_lag_), lag_ny, lag_nx);
+
+            % coherence length of the SEED-indexed field, for comparison with
+            % xi_rad (which is measured on the final-position field)
+            if XI.ENABLE
+                xi_start(it) = coherence_length( ...
+                    reshape(S_lag_, lag_ny, lag_nx), ...
+                    true(lag_ny, lag_nx), LAG.STEP, XI.MAX_LAG);
+            end
+        else
+            cycleData.S_start(:,:,it) = NaN('single');
+        end
+        clear S_lag_
 
         haz_f(it) = nnz(lowNow_) / numel(lowNow_);
         if ~isempty(tr_lowPrev)
@@ -626,6 +700,24 @@ for it = 1:cycles
         % one measured lattice cell stands for this many full-resolution px
         cellArea = SParams.FIELD_STEP^2;
 
+        % ---- cross-check: the two framings must agree on the AREA ----
+        % S_start indexes material by seed, blueC indexes it by current
+        % position. The map is area preserving, so the low-stretch fraction is
+        % the same quantity measured two independent ways -- different orbits,
+        % different lattices, one shared invariant. They agree statistically,
+        % not exactly, so the tolerance is loose on purpose: measured worst
+        % |f_start - f_now| was 0.0062 over 12 cycles x 5 kick realisations,
+        % and a genuinely broken sweep would miss by 0.5 or more.
+        if LAG.ENABLE && lag_valid(it) && nnz(validC) > 0
+            f_start_ = mean(cycleData.S_start(:,:,it) <= SParams.S_THR, 'all');
+            f_now_   = nnz(blueC) / nnz(validC);
+            assert(abs(f_start_ - f_now_) < 0.02, ...
+                   ['cycle %d: S_start and S_now disagree on the low-stretch ' ...
+                    'fraction (%.5f vs %.5f). Area preservation says they ' ...
+                    'cannot; one of the two sweeps is wrong.'], ...
+                   it, f_start_, f_now_);
+        end
+
         % ---- coherence length of log S on the measured lattice ----
         % Lattice lags are converted to pixels inside the helper, so xi is in
         % px whatever FIELD_STEP is.
@@ -718,6 +810,7 @@ for it = 1:cycles
         else
             aLow_full = cellfun(@numel, CC_low_meas(:)) * cellArea;
             aLow_full = sort(aLow_full(:), 'descend');
+            blob_area_history{it} = aLow_full;
         end
 
         n_low_blobs_fullres(it) = numel(aLow_full);
@@ -1258,6 +1351,9 @@ cycleData.dotStats_history = dotStats_history;
 % measured on the same material via the tracer lattice; haz_net is
 % 1 - f(N)/f(N-1), which is NOT a hazard here because the low-stretch set is
 % not nested in N (see haz_reent, the re-entry rate that breaks it).
+cycleData.blob_area_history = blob_area_history;
+cycleData.lag_valid = lag_valid;
+cycleData.xi_start  = xi_start;
 cycleData.haz_f     = haz_f;
 cycleData.haz_gross = haz_gross;
 cycleData.haz_net   = haz_net;
@@ -1529,6 +1625,134 @@ assert(all(isnan(total_low_blob_area_px_fullres) | ...
 fprintf('Low-stretch area fit: A = %.6e * exp(%.6f * N)\n', A0A, kA);
 
 %% ------------------------------------------------------------------------
+%%  Figure 6800: DISTRIBUTION OF LOW-STRETCH BLOB AREAS ACROSS CYCLES
+%% ------------------------------------------------------------------------
+% The total area vs cycle (fig 6100) says how much low-stretch material there
+% is. This says how it is DIVIDED, which is a different story and the one that
+% shows fragmentation. Measured on this system the blob-area distribution
+% spans 3 to 5.5 decades, so the bins are logarithmic -- on linear bins the
+% whole distribution is one bar.
+%
+% Both weightings are shown because they disagree about what matters:
+%   by COUNT, the distribution is dominated by single-cell specks,
+%   by AREA,   it is dominated by the few largest blobs.
+% At N=2 the single biggest blob holds 52% of all low-stretch area and nothing
+% is in blobs under 4 px; by N=12 the biggest holds 2.6% and 11% of the area
+% has broken into sub-4 px fragments. That migration IS the fragmentation.
+haveB = find(~cellfun(@isempty, blob_area_history(:)'));
+if ~isempty(haveB)
+    allA = vertcat(blob_area_history{haveB});
+    aMin = max(1, min(allA));
+    aMax = max(max(allA), aMin*10);   % keep the log edges strictly increasing
+    nBin = 28;
+    edges = logspace(log10(aMin), log10(aMax*1.0001), nBin+1);
+    ctrs  = sqrt(edges(1:end-1).*edges(2:end));
+
+    Hcnt = zeros(numel(haveB), nBin);   % blobs per bin
+    Har  = zeros(numel(haveB), nBin);   % share of that cycle's area per bin
+    for q = 1:numel(haveB)
+        a = blob_area_history{haveB(q)};
+        Hcnt(q,:) = histcounts(a, edges);
+        bi = discretize(a, edges);
+        bi(~isfinite(bi)) = nBin;            % clamp the top edge, never NaN
+        bi = min(max(bi,1), nBin);
+        wsum = accumarray(bi, a, [nBin 1])';
+        if sum(wsum) > 0, Har(q,:) = wsum / sum(wsum); end
+    end
+
+    figure(6800); clf;
+    set(gcf,'Color','w','Position',[80 80 1500 470], ...
+        'Name','Distribution of low-stretch blob areas across cycles');
+    tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
+    cmapC = parula(max(numel(haveB),2));
+
+    nexttile;
+    for q = 1:numel(haveB)
+        stairs(edges(1:end-1), Hcnt(q,:), 'LineWidth',1.4, 'Color',cmapC(q,:));
+        hold on;
+    end
+    set(gca,'XScale','log','YScale','log'); grid on;
+    xlabel('blob area (px^2)'); ylabel('number of blobs');
+    title('By COUNT: dominated by specks');
+    cb1 = colorbar; cb1.Label.String = 'cycle';
+    if haveB(end) > haveB(1), caxis([haveB(1) haveB(end)]); end
+
+    nexttile;
+    for q = 1:numel(haveB)
+        stairs(edges(1:end-1), Har(q,:), 'LineWidth',1.4, 'Color',cmapC(q,:));
+        hold on;
+    end
+    set(gca,'XScale','log'); grid on;
+    xlabel('blob area (px^2)'); ylabel('share of that cycle''s low-stretch area');
+    title('By AREA: dominated by the few largest');
+    cb2 = colorbar; cb2.Label.String = 'cycle';
+    if haveB(end) > haveB(1), caxis([haveB(1) haveB(end)]); end
+
+    nexttile;
+    imagesc(1:nBin, haveB, log10(max(Hcnt,0.1)));
+    set(gca,'YDir','normal'); colormap(gca, parula); cb3 = colorbar;
+    cb3.Label.String = 'log_{10} blobs per bin';
+    xt = round(linspace(1,nBin,6));
+    set(gca,'XTick',xt,'XTickLabel',compose('%.0f', ctrs(xt)));
+    xlabel('blob area (px^2)'); ylabel('cycle');
+    title('Fragmentation map: cycle vs area');
+
+    fprintf('\nLow-stretch blob-area distribution:\n');
+    fprintf('  %-6s %-8s %-9s %-9s %-11s %-11s %s\n', ...
+            'cycle','nblobs','median','p90','max','top1 %area','%area <4px');
+    for q = 1:numel(haveB)
+        a = blob_area_history{haveB(q)};
+        tot = sum(a);
+        fprintf('  %-6d %-8d %-9.0f %-9.0f %-11.0f %-10.1f%% %.1f%%\n', ...
+                haveB(q), numel(a), median(a), pct_nt(a,90), max(a), ...
+                100*max(a)/tot, 100*sum(a(a < 4))/tot);
+    end
+end
+
+%% ------------------------------------------------------------------------
+%%  Figure 6900: LAGRANGIAN S_start -- which SEED material got stretched
+%% ------------------------------------------------------------------------
+% Indexed by seed position and overlaid on the undeformed img0, this is the
+% question the Eulerian field cannot answer: not "where is the low-stretch
+% material now" but "which material was it". A fixed pixel of S_now holds
+% different material each cycle; a fixed pixel of S_start holds the same
+% parcel forever, which is what makes the hazard computable at all.
+if LAG.ENABLE && any(lag_valid)
+    itL = find(lag_valid, 1, 'last');
+    Sst = double(cycleData.S_start(:,:,itL));
+
+    figure(6900); clf;
+    set(gcf,'Color','w','Position',[100 80 1150 560], ...
+        'Name','Lagrangian S indexed by SEED position');
+    tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+
+    nexttile;
+    imshow(initialClipped, []); axis image off; hold on;
+    hL = imagesc([1 cols], [1 rows], Sst);
+    set(hL,'AlphaData', SParams.FIELD_ALPHA * ones(size(Sst)));
+    colormap(gca, cmap_blue_yellow); colorbar;
+    apply_log_S_cmap(gca, SParams.S_CLIP_MAX);
+    contour(linspace(1,cols,size(Sst,2)), linspace(1,rows,size(Sst,1)), ...
+            Sst, [SParams.S_THR SParams.S_THR], 'w', 'LineWidth',1.2);
+    title(sprintf(['S at SEED position, N=%d, on img0  |  seed spacing %d px' ...
+                   '  |  low fraction %.4f'], ...
+                  itL, LAG.STEP, haz_f(itL)));
+    hold off;
+
+    nexttile;
+    plot(1:cycles, xi_rad,   'o-', 'LineWidth',1.6); hold on;
+    plot(1:cycles, xi_start, 's--','LineWidth',1.6);
+    grid on;
+    xlabel('cycle  (= window length N)');
+    ylabel('\xi   (px)');
+    legend('\xi from S_{now} (final position)', ...
+           '\xi from S_{start} (seed position)', 'Location','best');
+    title({'Coherence length in the two framings', ...
+           'they converge as the field filaments -- the difference is early-time'}, ...
+          'FontSize', 9);
+end
+
+%% ------------------------------------------------------------------------
 %%  Figure 6600: COHERENCE LENGTH xi(N)
 %% ------------------------------------------------------------------------
 if XI.ENABLE && any(isfinite(xi_rad))
@@ -1592,7 +1816,7 @@ end
 % it equals the hazard only if the low-stretch set is nested in N, and it is
 % not -- material re-enters, so the set is refilled and the net decline
 % understates the gross dropout.
-if HAZ.ENABLE && any(isfinite(haz_gross))
+if LAG.ENABLE && any(isfinite(haz_gross))
     iEndH = min(cycles, SParams.Nwin);
     if cycles > SParams.Nwin
         fprintf(['Hazard: showing cycles 1-%d only; past Nwin the analysis ' ...
@@ -1609,7 +1833,7 @@ if HAZ.ENABLE && any(isfinite(haz_gross))
     for q = 1:numel(Nh)
         iq = Nh(q);
         if isfinite(xi_rad(iq)) && xi_rad(iq) > 0 && isfinite(np(q)) && np(q) > 0
-            n_eff_h = (np(q)*HAZ.STEP^2) / (2*pi*xi_rad(iq)^2);
+            n_eff_h = (np(q)*LAG.STEP^2) / (2*pi*xi_rad(iq)^2);
             ehg(q)  = sqrt(max(hg(q)*(1-hg(q)),0) / max(n_eff_h,1));
         end
     end
@@ -2107,6 +2331,20 @@ if c0 <= c1
 else
     xi = (j-2) + (c0 - e)/(c0 - c1);
 end
+end
+
+function v = pct_nt(x, p)
+% Percentile without the Statistics Toolbox (linear interpolation between
+% order statistics, matching prctile's default definition closely enough for
+% a reported summary).
+x = sort(x(:));
+n = numel(x);
+if n == 0, v = NaN; return; end
+if n == 1, v = x; return; end
+q = (p/100)*n - 0.5;            % prctile's midpoint convention
+q = min(max(q, 0), n-1);
+lo = floor(q); hi = min(lo+1, n-1);
+v  = x(lo+1) + (q - lo)*(x(hi+1) - x(lo+1));
 end
 
 function [k, b, sk, sb, R2] = wls_line(x, y, w)
