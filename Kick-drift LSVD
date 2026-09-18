@@ -1662,7 +1662,7 @@ if ~isempty(haveB)
 
     figure(6800); clf;
     set(gcf,'Color','w','Position',[80 80 1500 470], ...
-        'Name','Distribution of low-stretch blob areas across cycles');
+        'Name','Blob-area distribution across cycles (see fig 6801 for per-cycle bars)');
     tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
     cmapC = parula(max(numel(haveB),2));
 
@@ -1696,6 +1696,47 @@ if ~isempty(haveB)
     set(gca,'XTick',xt,'XTickLabel',compose('%.0f', ctrs(xt)));
     xlabel('blob area (px^2)'); ylabel('cycle');
     title('Fragmentation map: cycle vs area');
+
+    % ---------------- Figure 6801: THE HISTOGRAM, one panel per cycle -------
+    % Figure 6800 above compares cycles by drawing each distribution as an
+    % outline, which is readable as a comparison but is not a histogram. This
+    % is: real bars, one panel per cycle, so the distribution at each cycle can
+    % be read on its own and the sequence shows the drift.
+    %
+    % Bins are shared across all panels (same log-spaced edges) so the panels
+    % are directly comparable -- per-panel binning would make each cycle look
+    % alike regardless of how the areas actually moved. Both axes are log: the
+    % areas span 3-5 decades and the counts span 4.
+    figure(6801); clf;
+    nC  = numel(haveB);
+    ncH = min(4, nC);
+    nrH = ceil(nC/ncH);
+    set(gcf,'Color','w', ...
+        'Position',[60 60 min(360*ncH,1560) min(300*nrH,980)], ...
+        'Name','Histogram of low-stretch blob areas, per cycle');
+    tiledlayout(nrH, ncH, 'TileSpacing','compact','Padding','compact');
+
+    yTop = max(1, max(Hcnt(:)));
+    for q = 1:nC
+        nexttile;
+        a = blob_area_history{haveB(q)};
+        histogram('BinEdges', edges, 'BinCounts', Hcnt(q,:), ...
+                  'FaceColor', cmapC(q,:), 'EdgeColor','none', 'FaceAlpha',0.95);
+        hold on;
+        med_q = median(a);
+        xline(med_q, 'k--', 'LineWidth',1.2);
+        set(gca,'XScale','log','YScale','log');
+        xlim([edges(1) edges(end)]);
+        ylim([0.7 yTop*1.5]);            % shared, so panels are comparable
+        grid on;
+        title(sprintf('cycle %d:  n=%d,  med=%.0f,  max=%.0f px^2', ...
+                      haveB(q), numel(a), med_q, max(a)), 'FontSize', 9);
+        if q > nC - ncH, xlabel('blob area (px^2)'); end
+        if mod(q-1, ncH) == 0, ylabel('number of blobs'); end
+    end
+    sgtitle(sprintf(['Low-stretch (S \\leq %.1f) blob-area distribution per cycle' ...
+                     '   |   shared log bins, dashed line = median'], ...
+                    SParams.S_THR), 'FontWeight','bold');
 
     fprintf('\nLow-stretch blob-area distribution:\n');
     fprintf('  %-6s %-8s %-9s %-9s %-11s %-11s %s\n', ...
