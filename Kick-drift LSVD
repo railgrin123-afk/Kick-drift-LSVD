@@ -226,8 +226,7 @@ ZOOM.ENABLE = true;
 % every window uses ZOOM.SPACING. A whole-frame view and a 400x400 view want
 % very different densities, so the defaults differ here.
 ZOOM.WINDOWS = [   1    1 rows cols  8 ; ...   % whole frame, uncropped
-                 761  761  400  400  2 ; ...
-                 200 1200  400  400  2 ];
+                 761  761  2100  2100  1];
 
 % Default probe spacing in pixels for windows that do not set their own:
 % 1 = every pixel in the window, 2 = every other, 4, 8, ...
