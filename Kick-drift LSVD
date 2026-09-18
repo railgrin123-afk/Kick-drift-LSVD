@@ -244,6 +244,52 @@ ZOOM.SPACING = 2;
 ZOOM.MARKER     = 12;
 ZOOM.SHOW_IMAGE = true;    % draw the kick-drift frame behind the dots
 
+% -------------------- HAZARD TRACER --------------------
+% A lattice of fixed INITIAL conditions carrying its own running monodromy,
+% advanced one step per cycle. It exists to answer a question the area series
+% cannot: of the material that was low-stretch at N-1, how much leaves by N?
+%
+% The naive hazard h(N) = 1 - f(N)/f(N-1) is only that conditional rate if
+% {S_N <= S_THR} is NESTED in N. It is not. sigma_max(M_N) is not monotone in
+% N for a symplectic map -- rotation can undo stretching -- and measured on
+% this system, material RE-ENTERS the low-stretch set at a rate rising from
+% 2% of it at N=2 to 26% at N=12. The two disagree badly, and in the
+% direction that matters:
+%
+%   N     f(N)    1 - f/f_prev    true P(out|in)    re-entrants
+%   2   0.5929       0.361            0.375            2.2%
+%   6   0.1899       0.192            0.342           18.6%
+%   9   0.0988       0.132            0.345           24.6%
+%  12   0.0519       0.187            0.398           26.0%
+%
+% The naive curve falls from 0.36 to ~0.19 and reads as a DECLINING hazard,
+% which would be evidence of a hardy subpopulation. The true conditional
+% dropout is flat at ~0.38, which is memoryless. Net decline is smaller than
+% gross dropout because re-entrants keep refilling the set, so the naive
+% formula answers the annealed-vs-quenched question backwards. Both are
+% plotted; the gross rate is the one carrying the physics.
+%
+% Cost is one map step per cycle over the lattice -- the running monodromy
+% means it never re-integrates history -- so this is negligible next to the
+% S-field sweep.
+HAZ.ENABLE = true;
+HAZ.STEP   = 2;    % IC lattice spacing in px (2 -> 960x960 tracers, ~44 MB)
+
+% -------------------- COHERENCE LENGTH --------------------
+% xi(N): the separation at which the spatial autocorrelation of log S falls to
+% 1/e. Measured radially and along each axis, so the anisotropy is visible --
+% that is the filamentation signal area alone cannot show. On this system xi
+% falls from ~45 px at N=1 to ~17 px at N=12 while the field goes from
+% elongated along y (xi_x/xi_y = 0.49) to near isotropic (1.07).
+%
+% The correlation is close to exponential over the first 1/e of decay
+% (measured R^2 0.80-0.999, typically >0.96), so the fitted decay constant is
+% reported alongside the crossing; the crossing is the headline because it
+% needs no fit. R^2 is reported so a cycle where the exponential is a poor
+% description is visible rather than silent.
+XI.ENABLE   = true;
+XI.MAX_LAG  = 128;   % largest separation examined, px
+
 % ---- DOT colours, one per S band (see dot_band_index for the bands) ----
 % Hoisted out of the per-cycle loop: these are constants, and the zoom probe
 % figures need them too.
@@ -374,6 +420,10 @@ runMetadata.SParams = SParams;
 % own window into the frame and warns if it had to)
 runMetadata.ZOOM = ZOOM;
 
+% Hazard tracers and coherence length
+runMetadata.HAZ = HAZ;
+runMetadata.XI  = XI;
+
 % Display switches
 runMetadata.OVERLAY_S_FIELD_ON_DOTS = OVERLAY_S_FIELD_ON_DOTS;
 runMetadata.SHOW_Y2B_MAGENTA = SHOW_Y2B_MAGENTA;
@@ -411,10 +461,75 @@ xyLow_history   = cell(cycles,1);
 xyHigh_history  = cell(cycles,1);
 dotStats_history = cell(cycles,1);
 
+% -------------------- HAZARD TRACER + COHERENCE LENGTH STORAGE --------------------
+% Tracers are a lattice of INITIAL conditions, each carrying its own running
+% monodromy M. One step is applied per cycle, so S_N for the SAME material is
+% available at every N without ever re-integrating from the start.
+haz_f     = nan(cycles,1);   % fraction of tracers with S <= S_THR
+haz_gross = nan(cycles,1);   % P(leaves the low set at N | was in it at N-1)
+haz_net   = nan(cycles,1);   % 1 - f(N)/f(N-1), the naive form
+haz_reent = nan(cycles,1);   % share of the low set at N that was NOT low at N-1
+haz_nprev = nan(cycles,1);   % size of the conditioning population
+xi_rad    = nan(cycles,1);   % coherence length of log S, radial, px
+xi_x      = nan(cycles,1);
+xi_y      = nan(cycles,1);
+xi_R2     = nan(cycles,1);   % quality of the exponential description
+
+if HAZ.ENABLE
+    [tHX, tHY] = meshgrid(0:HAZ.STEP:cols-1, 0:HAZ.STEP:rows-1);
+    tr_x = double(tHX(:));            tr_y = double(tHY(:));
+    clear tHX tHY
+    tr_a = ones(size(tr_x));          tr_b = zeros(size(tr_x));
+    tr_c = zeros(size(tr_x));         tr_d = ones(size(tr_x));
+    tr_lowPrev = [];
+    fprintf('Hazard tracers: %d initial conditions at %d px spacing.\n', ...
+            numel(tr_x), HAZ.STEP);
+end
+
 for it = 1:cycles
     % ---- new random kick profile ----
     dp_x = K * randpot1d_four(cf_x);
     dp_x_hist{end+1} = dp_x; %#ok<SAGROW>
+
+    % ---- advance the hazard tracers one step with THIS cycle's kick ----
+    % Same arithmetic as monodromy_S_vec, but incremental: M <- J*M each cycle
+    % rather than rebuilding M from t0 every time. Only valid while the
+    % analysis window still starts at t0 = 0, i.e. while it <= Nwin; past that
+    % the field's window slides and the tracers no longer describe it, which
+    % is why the hazard figure stops at min(cycles, Nwin).
+    if HAZ.ENABLE
+        nk_ = numel(dp_x);
+        xf_ = floor(tr_x);
+        i0_ = mod(xf_, nk_);
+        d0_ = dp_x(i0_+1);
+        fp_ = dp_x(mod(i0_+1, nk_)+1) - d0_;
+
+        g_  = 1 + Tau*fp_;
+        a2_ = g_.*tr_a + Tau*tr_c;   b2_ = g_.*tr_b + Tau*tr_d;
+        tr_c = fp_.*tr_a + tr_c;     tr_d = fp_.*tr_b + tr_d;
+        tr_a = a2_;                  tr_b = b2_;
+
+        tr_y = tr_y + d0_ + fp_.*(tr_x - xf_);
+        tr_x = tr_x + Tau*(tr_y - row0);
+        clear xf_ i0_ d0_ fp_ g_ a2_ b2_
+
+        tt_    = tr_a.^2 + tr_b.^2 + tr_c.^2 + tr_d.^2;
+        lowNow_ = ((sqrt(tt_+2) + sqrt(max(tt_-2,0)))/2) <= SParams.S_THR;
+        clear tt_
+
+        haz_f(it) = nnz(lowNow_) / numel(lowNow_);
+        if ~isempty(tr_lowPrev)
+            nprev_ = nnz(tr_lowPrev);
+            haz_nprev(it) = nprev_;
+            haz_gross(it) = nnz(tr_lowPrev & ~lowNow_) / max(nprev_, 1);
+            haz_reent(it) = nnz(lowNow_ & ~tr_lowPrev) / max(nnz(lowNow_), 1);
+            if haz_f(it-1) > 0
+                haz_net(it) = 1 - haz_f(it)/haz_f(it-1);
+            end
+        end
+        tr_lowPrev = lowNow_;
+        clear lowNow_
+    end
 
     % ---- warp for visualization (pullback) ----
     stage1_img = warp_image(cur, @InverseKick_vert, struct('dp_x', dp_x));
@@ -510,6 +625,14 @@ for it = 1:cycles
 
         % one measured lattice cell stands for this many full-resolution px
         cellArea = SParams.FIELD_STEP^2;
+
+        % ---- coherence length of log S on the measured lattice ----
+        % Lattice lags are converted to pixels inside the helper, so xi is in
+        % px whatever FIELD_STEP is.
+        if XI.ENABLE && any(validC(:))
+            [xi_rad(it), xi_x(it), xi_y(it), xi_R2(it)] = ...
+                coherence_length(Scoarse, validC, SParams.FIELD_STEP, XI.MAX_LAG);
+        end
 
         % ---- MAGENTA: material that dropped from S > S_THR to S <= S_THR ----
         % This follows the PARCEL, not the screen pixel. Every pixel of the
@@ -1130,6 +1253,21 @@ cycleData.xyLow_history = xyLow_history;
 cycleData.xyHigh_history = xyHigh_history;
 cycleData.dotStats_history = dotStats_history;
 
+% -------------------- PER-CYCLE DIAGNOSTIC SERIES --------------------
+% Saved for downstream analysis. haz_gross is the real conditional dropout,
+% measured on the same material via the tracer lattice; haz_net is
+% 1 - f(N)/f(N-1), which is NOT a hazard here because the low-stretch set is
+% not nested in N (see haz_reent, the re-entry rate that breaks it).
+cycleData.haz_f     = haz_f;
+cycleData.haz_gross = haz_gross;
+cycleData.haz_net   = haz_net;
+cycleData.haz_reent = haz_reent;
+cycleData.haz_nprev = haz_nprev;
+cycleData.xi_rad    = xi_rad;
+cycleData.xi_x      = xi_x;
+cycleData.xi_y      = xi_y;
+cycleData.xi_R2     = xi_R2;
+
 % Save the final kick-drift frame separately for convenient access
 finalClipped = min(max(final_img,0),1);
 cycleData.finalRGB = uint8(round(255*finalClipped));
@@ -1269,20 +1407,56 @@ yA = area_blue_px(iStart:iEnd);
 
 goodA = isfinite(xA) & isfinite(yA) & (yA > 0);
 
+% ---- uncertainty on each area point ----
+% The low-stretch set is spatially correlated, so pixels are nowhere near
+% independent samples. Treating them as independent understates the error by
+% a factor of ~31 here: measured across 12 kick realisations the scatter in
+% the area fraction was 0.0129, while a per-pixel binomial predicts 0.00042.
+%
+% The correct count is the number of independent CORRELATION PATCHES. For a
+% field with correlation C(r) = exp(-r/xi) the integral correlation area is
+%     A_c = \int C(|r|) d^2r = 2*pi*xi^2,
+% so n_eff = A_valid / (2*pi*xi^2) and sigma_p = sqrt(p(1-p)/n_eff). Checked
+% against the same 12 realisations: predicted 0.0172 against a measured
+% 0.0129, i.e. conservative by ~30% rather than wrong by 30x. xi comes from
+% this cycle's own measured correlation, so the bars widen as the field
+% filaments and the patches shrink.
+sigLogA = nan(cycles,1);
+for iq = 1:cycles
+    if isfinite(xi_rad(iq)) && xi_rad(iq) > 0 && isfinite(frac_blue(iq)) ...
+            && frac_blue(iq) > 0 && frac_blue(iq) < 1 && area_total_px(iq) > 0
+        n_eff      = area_total_px(iq) / (2*pi*xi_rad(iq)^2);
+        sig_p      = sqrt(frac_blue(iq)*(1-frac_blue(iq)) / max(n_eff,1));
+        sigLogA(iq) = sig_p / frac_blue(iq);       % d(log A) = dp/p
+    end
+end
+eA = sigLogA(iStart:iEnd);
+eA(~isfinite(eA) | eA <= 0) = NaN;
+% points with no usable sigma still get fitted, at the median weight
+eA(isnan(eA)) = median(eA(~isnan(eA)));
+if all(isnan(eA)), eA(:) = 1; end
+
 if nnz(goodA) >= 2
-    pA = polyfit(xA(goodA), log(yA(goodA)), 1);   % log(A) = pA(1)*cycle + pA(2)
-    logyA_fit = polyval(pA, xA(goodA));
+    wA = 1 ./ eA(goodA).^2;
+    [kA, bA, skA, sbA, R2A] = wls_line(xA(goodA), log(yA(goodA)), wA);
+    pA = [kA bA];
+    logyA_fit = kA*xA(goodA) + bA;
     yA_fit    = exp(logyA_fit);
 
-    kA   = pA(1);
-    A0A  = exp(pA(2));
+    A0A  = exp(bA);
     tauA = -1 / kA;
+    stauA = skA / kA^2;                 % d(-1/k) = dk/k^2
 else
     pA = [NaN NaN];
     logyA_fit = [];
     yA_fit    = [];
-    kA = NaN; A0A = NaN; tauA = NaN;
+    kA = NaN; bA = NaN; A0A = NaN; tauA = NaN;
+    skA = NaN; sbA = NaN; R2A = NaN; stauA = NaN;
 end
+
+fprintf(['Low-stretch area fit: slope k = %.4f +- %.4f per cycle | ' ...
+         'tau = %.3f +- %.3f cycles | R^2 = %.4f\n'], ...
+        kA, skA, tauA, stauA, R2A);
 
 % interpolated value exactly at the intersection cycle
 yA_cross = interp1(1:cycles, area_blue_px, cStar, 'linear', 'extrap');
@@ -1310,22 +1484,33 @@ ylabel('low-stretch area (pixels)');
 title('Low-stretch area decay vs window length N (semilogy)');
 xlim([cStar cycles]);
 
-% --- right: linearized log plot ---
+% --- right: linearized log plot, with error bars and the fitted slope ---
 nexttile;
 plot(cStar, log(yA_cross), 'ks', 'MarkerFaceColor','y', 'MarkerSize',8); hold on;
-plot(xA(goodA), log(yA(goodA)), 'o-', 'LineWidth',1.5);
+errorbar(xA(goodA), log(yA(goodA)), eA(goodA), 'o', ...
+         'LineWidth',1.3, 'MarkerFaceColor','auto', 'CapSize',5);
 if nnz(goodA) >= 2
     plot(xA(goodA), logyA_fit, '--', 'LineWidth',1.8);
-    legend('intersection', 'log(data)', ...
-           sprintf('linear fit: log(A) = %.3f c %+.3f', pA(1), pA(2)), ...
-           'Location','best');
+    % +-1 sigma band on the fitted LINE (slope and intercept errors, no
+    % covariance term -- this is a visual guide, the quoted numbers are exact)
+    xb = linspace(min(xA(goodA)), max(xA(goodA)), 50)';
+    sb_line = sqrt((skA*xb).^2 + sbA^2);
+    plot(xb, kA*xb + bA + sb_line, ':', 'Color',[0.6 0.6 0.6], 'LineWidth',1.0);
+    plot(xb, kA*xb + bA - sb_line, ':', 'Color',[0.6 0.6 0.6], 'LineWidth',1.0);
+    legend('intersection', 'log(data) \pm 1\sigma', ...
+           sprintf('WLS fit: slope = %.4f \\pm %.4f', kA, skA), ...
+           '\pm1\sigma on fit', 'Location','best');
 else
     legend('intersection', 'log(data)', 'Location','best');
 end
 grid on;
 xlabel('window length  N');
 ylabel('log(low-stretch area)');
-title(sprintf('Linearized decay: log(A) vs N | tau = %.3f in units of N', tauA));
+title({sprintf('Linearised decay: log A = %.4f N %+.3f   (R^2 = %.4f)', ...
+               kA, bA, R2A), ...
+       sprintf(['slope %.4f \\pm %.4f per cycle   |   tau = %.2f \\pm %.2f cycles' ...
+                '   |   half-life %.2f'], ...
+               kA, skA, tauA, stauA, log(2)*abs(tauA))}, 'FontSize', 10);
 xlim([cStar cycles]);
 
 % Figure 6501 used to repeat this fit on total_low_blob_area_px_fullres.
@@ -1341,8 +1526,150 @@ assert(all(isnan(total_low_blob_area_px_fullres) | ...
        ['total_low_blob_area_px_fullres has diverged from area_blue_px; ' ...
         'the blob decomposition no longer partitions blueC.']);
 
-fprintf('Low-stretch area fit: A = %.6e * exp(%.6f * N), tau = %.6f in window length N\n', ...
-        A0A, kA, tauA);
+fprintf('Low-stretch area fit: A = %.6e * exp(%.6f * N)\n', A0A, kA);
+
+%% ------------------------------------------------------------------------
+%%  Figure 6600: COHERENCE LENGTH xi(N)
+%% ------------------------------------------------------------------------
+if XI.ENABLE && any(isfinite(xi_rad))
+    figure(6600); clf;
+    set(gcf,'Color','w','Position',[120 100 1150 430], ...
+        'Name','Coherence length of log S vs cycle');
+    tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+
+    nexttile;
+    plot(1:cycles, xi_rad, 'o-', 'LineWidth',1.8); hold on;
+    plot(1:cycles, xi_x,   's--','LineWidth',1.2);
+    plot(1:cycles, xi_y,   'd--','LineWidth',1.2);
+    grid on;
+    xlabel('cycle  (= window length N while t_0 = 0)');
+    ylabel('\xi   (px, where corr(log S) falls to 1/e)');
+    legend('radial','along x','along y','Location','best');
+    title('Coherence length of log S');
+
+    nexttile;
+    ratio_xy = xi_x ./ xi_y;
+    yyaxis left;
+    plot(1:cycles, ratio_xy, 'o-', 'LineWidth',1.6); hold on;
+    yline(1, 'k:', 'isotropic', 'LineWidth',1.1);
+    ylabel('\xi_x / \xi_y   (anisotropy)');
+    yyaxis right;
+    plot(1:cycles, xi_R2, '^--', 'LineWidth',1.2);
+    ylabel('R^2 of exponential fit');
+    ylim([0 1]);
+    grid on;
+    xlabel('cycle');
+    title({'Anisotropy, and how well an exponential describes the decay', ...
+           'ratio far from 1 = filamented; R^2 low = xi is only a scale, not a fit'}, ...
+          'FontSize', 9);
+
+    fprintf('\nCoherence length of log S (1/e crossing):\n');
+    fprintf('  %-6s %-9s %-9s %-9s %-9s %s\n', ...
+            'cycle','xi_rad','xi_x','xi_y','xi_x/xi_y','R^2');
+    for iq = 1:cycles
+        if isfinite(xi_rad(iq))
+            fprintf('  %-6d %-9.1f %-9.1f %-9.1f %-9.2f %.3f\n', ...
+                    iq, xi_rad(iq), xi_x(iq), xi_y(iq), ...
+                    xi_x(iq)/xi_y(iq), xi_R2(iq));
+        end
+    end
+end
+
+%% ------------------------------------------------------------------------
+%%  Figure 6700: HAZARD RATE h(N)
+%% ------------------------------------------------------------------------
+% The shape is the physics, not the value:
+%   flat      -> memoryless. Every survivor faces the same risk each step,
+%                regardless of how long it has already lasted.
+%   declining -> heterogeneity. The fragile are removed early and a hardier
+%                subpopulation is left behind. This is persistent structure.
+%   rising    -> wear-out. Damage accumulates and survivors get more fragile.
+%
+% TWO curves are plotted because they do not agree, and only one is a hazard.
+% h_gross follows the SAME MATERIAL (the tracer lattice) and is the genuine
+% conditional dropout P(leaves by N | present at N-1). h_net = 1 - f(N)/f(N-1)
+% is the net change in set size, which is what the area series alone can see;
+% it equals the hazard only if the low-stretch set is nested in N, and it is
+% not -- material re-enters, so the set is refilled and the net decline
+% understates the gross dropout.
+if HAZ.ENABLE && any(isfinite(haz_gross))
+    iEndH = min(cycles, SParams.Nwin);
+    if cycles > SParams.Nwin
+        fprintf(['Hazard: showing cycles 1-%d only; past Nwin the analysis ' ...
+                 'window slides off t_0 = 0 and the tracers stop describing ' ...
+                 'the field.\n'], iEndH);
+    end
+    Nh = (2:iEndH)';
+    hg = haz_gross(Nh);  hn = haz_net(Nh);
+    rr = haz_reent(Nh);  np = haz_nprev(Nh);
+
+    % binomial error on the gross hazard, using independent correlation
+    % patches rather than tracers (same n_eff argument as the area fit)
+    ehg = nan(size(hg));
+    for q = 1:numel(Nh)
+        iq = Nh(q);
+        if isfinite(xi_rad(iq)) && xi_rad(iq) > 0 && isfinite(np(q)) && np(q) > 0
+            n_eff_h = (np(q)*HAZ.STEP^2) / (2*pi*xi_rad(iq)^2);
+            ehg(q)  = sqrt(max(hg(q)*(1-hg(q)),0) / max(n_eff_h,1));
+        end
+    end
+
+    figure(6700); clf;
+    set(gcf,'Color','w','Position',[120 100 1150 430], ...
+        'Name','Hazard rate h(N): flat = memoryless, declining = structure');
+    tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+
+    nexttile;
+    errorbar(Nh, hg, ehg, 'o-', 'LineWidth',1.8, 'CapSize',5); hold on;
+    plot(Nh, hn, 's--', 'LineWidth',1.3);
+    okh = isfinite(hg) & isfinite(ehg) & ehg > 0;
+    if nnz(okh) >= 2
+        wh    = 1./ehg(okh).^2;
+        hbar  = sum(wh.*hg(okh))/sum(wh);            % best flat hazard
+        [kh, ~, skh] = wls_line(Nh(okh), hg(okh), wh);
+        yline(hbar, 'k:', sprintf('flat h = %.3f', hbar), 'LineWidth',1.4);
+        verdict = 'memoryless (flat)';
+        if kh - 2*skh > 0
+            verdict = 'RISING: wear-out';
+        elseif kh + 2*skh < 0
+            verdict = 'DECLINING: heterogeneity';
+        end
+        title({sprintf('Hazard h(N) = P(out at N | in at N-1)   [%s]', verdict), ...
+               sprintf('trend %.4f \\pm %.4f per cycle   (flat within %.1f\\sigma)', ...
+                       kh, skh, abs(kh)/max(skh,eps))}, 'FontSize', 10);
+        fprintf(['\nHazard: gross h = %.4f (flat estimate), trend %.4f +- %.4f ' ...
+                 'per cycle -> %s\n'], hbar, kh, skh, verdict);
+    else
+        title('Hazard h(N)');
+    end
+    grid on;
+    xlabel('window length  N');
+    ylabel('per-step conditional dropout');
+    legend('h_{gross}: same material \pm1\sigma', ...
+           'h_{net} = 1 - f(N)/f(N-1)', 'Location','best');
+    ylim([0 1]);
+
+    nexttile;
+    plot(Nh, 100*rr, 'o-', 'LineWidth',1.6); hold on;
+    grid on;
+    xlabel('window length  N');
+    ylabel('re-entrants  (% of the low set at N)');
+    title({'Why the two curves differ: material RE-ENTERS the low set', ...
+           'nested survival would sit at 0% -- h_{net} is not a hazard'}, ...
+          'FontSize', 9);
+
+    % The tracers index material by INITIAL condition while the field indexes
+    % it by FINAL position. The map is area preserving, so the two must report
+    % the same low-stretch fraction; printing both is a live check that the
+    % tracer lattice really is describing the same population as the field.
+    fprintf('\n  %-5s %-11s %-11s %-13s %-9s %-9s %s\n', ...
+            'N','h_gross','h_net','re-entrants','f_tracer','f_field','n_prev');
+    for q = 1:numel(Nh)
+        fprintf('  %-5d %-11.4f %-11.4f %-12.1f%% %-9.5f %-9.5f %d\n', ...
+                Nh(q), hg(q), hn(q), 100*rr(q), ...
+                haz_f(Nh(q)), frac_blue(Nh(q)), np(q));
+    end
+end
 
 %% ========================================================================
 %%  E)  FINAL FULL-RESOLUTION BLOB ANALYSIS
@@ -1690,6 +2017,131 @@ title({sprintf('%s  |  rows %d-%d, cols %d-%d  (%d x %d px)', ...
                spacing, nKept, numel(S))}, 'FontSize', 10);
 hold off;
 drawnow;
+end
+
+function [xi_r, xi_x, xi_y, R2fit] = coherence_length(Sc, mask, step, maxLagPx)
+% Coherence length of log S: the separation at which the spatial
+% autocorrelation falls to 1/e. Returned in PIXELS, radially and along each
+% axis separately, plus the R^2 of an exponential description.
+%
+% log S, not S. S is log-normal here, so its correlation is dominated by the
+% rare huge values; log S is the variable whose statistics are near-Gaussian
+% and whose correlation length means what it sounds like.
+%
+% The autocorrelation is computed by FFT and is CIRCULAR, which is right: the
+% field lives on a torus. Masked-out points are handled by correlating the
+% mask alongside the data and dividing, so a gap contributes no signal rather
+% than a zero.
+%
+% The anisotropy is the point. A filamented field is not isotropic -- it is
+% long along the stretching direction and short across it -- and xi_x/xi_y
+% shows that directly, where a single radial number would average it away.
+
+xi_r = NaN; xi_x = NaN; xi_y = NaN; R2fit = NaN;
+
+m = double(mask & isfinite(Sc));
+if nnz(m) < 64, return; end
+
+L = log(max(double(Sc), 1));      % S = sigma_max >= 1 exactly; guard anyway
+L(~logical(m)) = 0;
+mu = sum(L(:)) / nnz(m);
+L  = (L - mu) .* m;               % demeaned over valid points only
+
+Fd = fft2(L);   Fm = fft2(m);
+Rd = real(ifft2(Fd .* conj(Fd)));
+Rm = real(ifft2(Fm .* conj(Fm)));
+clear Fd Fm L
+C  = Rd ./ max(Rm, 1);            % normalise by the overlap count
+clear Rd Rm
+if C(1,1) <= 0, return; end
+C = C / C(1,1);
+
+[ny, nx] = size(C);
+Lm = max(2, min(floor(maxLagPx/step), floor(min(ny,nx)/2) - 1));
+
+% --- axis profiles: index 1 is lag 0 ---
+xi_x = xi_cross(C(1, 1:Lm+1)) * step;
+xi_y = xi_cross(C(1:Lm+1, 1)) * step;
+
+% --- radial profile over a small lag box (both signs, so it is symmetric) ---
+sel  = [1:Lm+1, (ny-Lm+1):ny];
+selx = [1:Lm+1, (nx-Lm+1):nx];
+sub  = C(sel, selx);
+dY   = [0:Lm, -Lm:-1]';
+dX   = [0:Lm, -Lm:-1];
+RR   = round(sqrt(dY.^2 + dX.^2));
+keep = RR <= Lm;
+Cr   = accumarray(RR(keep)+1, sub(keep), [Lm+1 1], @mean, NaN);
+xi_r = xi_cross(Cr) * step;
+
+% --- how well does an exponential describe it, out to ~2 xi? ---
+if isfinite(xi_r) && xi_r > 0
+    nfit = max(4, min(Lm, ceil(2*xi_r/step)));
+    r  = (1:nfit)';
+    v  = Cr(2:nfit+1);
+    ok = isfinite(v) & (v > 1e-3);
+    if nnz(ok) >= 3
+        pf   = polyfit(r(ok), log(v(ok)), 1);
+        res  = log(v(ok)) - polyval(pf, r(ok));
+        tot  = log(v(ok)) - mean(log(v(ok)));
+        if sum(tot.^2) > 0
+            R2fit = 1 - sum(res.^2)/sum(tot.^2);
+        end
+    end
+end
+end
+
+function xi = xi_cross(C)
+% First downward crossing of 1/e, linearly interpolated. C(1) is lag 0, so
+% C(k) is lag k-1 in LATTICE cells; the caller scales to pixels.
+C = C(:);
+e = exp(-1);
+j = find(C < e, 1, 'first');
+if isempty(j) || j == 1
+    xi = NaN;
+    return;
+end
+c0 = C(j-1); c1 = C(j);
+if c0 <= c1
+    xi = j - 2;
+else
+    xi = (j-2) + (c0 - e)/(c0 - c1);
+end
+end
+
+function [k, b, sk, sb, R2] = wls_line(x, y, w)
+% Weighted least squares fit of y = k*x + b, with standard errors.
+%
+% The errors are rescaled by the reduced chi-square, so they reflect the
+% scatter actually observed rather than trusting the supplied weights to be
+% exactly right -- the weights here come from an effective-sample-size
+% argument that is good to tens of percent, not exact.
+x = x(:); y = y(:); w = w(:);
+S0  = sum(w);      Sx  = sum(w.*x);     Sy = sum(w.*y);
+Sxx = sum(w.*x.^2); Sxy = sum(w.*x.*y);
+D   = S0*Sxx - Sx^2;
+if ~isfinite(D) || D == 0
+    k = NaN; b = NaN; sk = NaN; sb = NaN; R2 = NaN; return;
+end
+k  = (S0*Sxy - Sx*Sy)/D;
+b  = (Sxx*Sy - Sx*Sxy)/D;
+sk = sqrt(S0/D);
+sb = sqrt(Sxx/D);
+
+n = numel(x);
+if n > 2
+    chi2 = sum(w.*(y - (k*x + b)).^2);
+    s2   = chi2/(n-2);
+    sk   = sk*sqrt(s2);
+    sb   = sb*sqrt(s2);
+end
+ybar = sum(w.*y)/S0;
+den  = sum(w.*(y-ybar).^2);
+if den > 0
+    R2 = 1 - sum(w.*(y - (k*x+b)).^2)/den;
+else
+    R2 = NaN;
+end
 end
 
 function F = randpot1d_getFFT(c)
