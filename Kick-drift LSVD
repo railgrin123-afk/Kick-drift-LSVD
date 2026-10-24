@@ -24,7 +24,52 @@
 
 clear;
 clc;
-close all;
+
+% -------------------- KICK MODE --------------------
+% annealed : a fresh random kick every cycle (the original behaviour)
+% quenched : ONE random kick, drawn once and frozen for every cycle -- a
+%            time-independent map, so any regular structure can persist
+% cosine   : the textbook standard map, kick = A*sin(2*pi*x/cols)
+%
+% Comparing modes: the number that sets the stretching is the local
+% standard-map parameter a = Tau*f'(x), the off-diagonal of the step
+% Jacobian -- not kappa = K*Tau, which is a displacement scale. Measured
+% rms(a) is 0.3704 for the annealed kick (the zeroed DC bin carries 8.9% of
+% its spectral weight, which raises the rms slope 4.7% above the continuous
+% value 0.3536) and K_STD/sqrt(2) for the cosine. So K_STD = 0.50 matches the
+% annealed stretching to within 5%, and K_STD = 0.524 matches it exactly,
+% even though kappa_eff reads 152.8 against 24. a_rms is saved per cycle.
+KICK_MODE = 'annealed';   % 'annealed' | 'quenched' | 'cosine'
+K_STD     = 0.50;         % cosine mode only: textbook standard-map K
+KICK_MODE = validatestring(KICK_MODE, {'annealed','quenched','cosine'});
+
+% Each mode draws into its own block of figure numbers, so all three sets
+% can be open at once in one MATLAB session.
+switch KICK_MODE
+    case 'annealed', FIG_OFFSET = 0;
+    case 'quenched', FIG_OFFSET = 20000;
+    case 'cosine',   FIG_OFFSET = 40000;
+end
+
+% The offsets alone cannot keep the other modes open: this script used to
+% start with `close all`, which shut every mode's windows before drawing a
+% single figure. Now only THIS mode's block is closed. Memory: a run holds
+% several full-frame images in its figures (a 1920x1920 RGB double is 88 MB
+% of CData), so three modes open together can add roughly 1 GB; set this
+% false to get the old close-everything behaviour.
+KEEP_OTHER_MODE_FIGS = true;
+if KEEP_OTHER_MODE_FIGS
+    figs_ = findobj(groot, 'Type', 'figure');
+    for h_ = reshape(figs_, 1, [])
+        n_ = h_.Number;
+        if ~isempty(n_) && n_ >= FIG_OFFSET && n_ < FIG_OFFSET + 20000
+            close(h_);
+        end
+    end
+    clear figs_ h_ n_
+else
+    close all;
+end
 
 randomSeed = 0;
 rng(randomSeed,'twister');
@@ -102,6 +147,28 @@ assert(abs(K*Tau - kappa) < 1e-9*max(1,kappa), ...
        K*Tau, kappa);
 fprintf('Dynamics: kappa = K*Tau = %.4f | epsilon = K0*Tau0/(Lx*lc) = %.4f\n', ...
         kappa, epsilon);
+
+% kappa is the coefficient of the kick SHAPE in eta' = eta + kappa*u(x). The
+% shape is normalised differently per mode -- unit STD for the random kick,
+% unit AMPLITUDE for sin(2*pi*x/cols) -- so kappa_eff is the right number for
+% each mode on its own terms but not a cross-mode measure of kick strength.
+% For that, use a_rms (see KICK MODE at the top).
+%
+% The assert above stays on in every mode. It checks the unit conversion of K
+% and Tau, which does not depend on the mode, so it cannot misfire in cosine
+% mode -- and cosine mode still depends on Tau, in both the kick amplitude and
+% the drift. What changes per mode is which number describes the kick, and
+% that is kappa_eff.
+switch KICK_MODE
+    case 'cosine', kappa_eff = K_STD*cols/(2*pi);
+    otherwise,     kappa_eff = K0*Tau0*cols/Lx;
+end
+if strcmp(KICK_MODE, 'cosine')
+    fprintf(['Kick mode: cosine | K_STD = %.4f | kappa_eff = K_STD*cols/(2*pi) ' ...
+             '= %.4f  (K0 does not enter this mode)\n'], K_STD, kappa_eff);
+else
+    fprintf('Kick mode: %s | kappa_eff = %.4f\n', KICK_MODE, kappa_eff);
+end
 % Pure drift alone (u=0) has M_N = [[1, N*Tau],[0,1]] and sigma_max =
 % (b+sqrt(b^2+4))/2 with b = N*Tau, which reaches 2 at b = 1.5 exactly. With
 % Tau=0.5 that is cycle 3, so with S_THR=2 nothing can stay "low-stretch"
@@ -291,8 +358,9 @@ ZOOM.SHOW_IMAGE = true;    % draw the kick-drift frame behind the dots
 %
 % What actually needs S_start is narrower than it looks. Measured on a 960^2
 % seed lattice over 12 cycles and 5 kick realisations, the two framings agree
-% on the low-stretch AREA FRACTION to within 0.0062 worst case -- they must,
-% since the map is area preserving -- and their coherence lengths converge
+% on the low-stretch AREA FRACTION to within 0.0062 worst case for annealed
+% kicks (see the cross-check in the loop for why that holds there but not in
+% every mode) -- and their coherence lengths converge
 % (74.1 vs 65.2 px at N=1, 17.0 vs 17.7 px at N=12). So the survival curve and
 % xi do not need it. What genuinely does is the HAZARD, which asks whether the
 % SAME parcel left the low-stretch set, a question no Eulerian field can
@@ -318,6 +386,20 @@ LAG.STEP   = 2;    % seed lattice spacing in px (2 -> 960x960 parcels)
 % description is visible rather than silent.
 XI.ENABLE   = true;
 XI.MAX_LAG  = 128;   % largest separation examined, px
+% A structured map is organised on the scale of its resonance islands, not
+% of filaments: measured for cosine at K_STD = 0.5, xi is ~200-300 px and does
+% NOT shrink with N (300 px at N=4, 268 px at N=12, against 75 -> 17 px for
+% annealed). At 128 px the 1/e crossing is never reached, xi comes back NaN,
+% and every error bar built from it goes with it. So the structured modes
+% search further. Annealed keeps 128: its xi never exceeds ~75 px, but its
+% cycle-1 exponential fit runs out to 2*xi = 148 px and is capped at 128, so
+% widening the search there would change xi_R2 and break bit-identity.
+% Caveat at these scales: x is exactly periodic, so xi_x is exact, but y has
+% period cols/Tau = 3840 px and the FFT wraps it at 1920, so xi_y and the
+% radial xi pick up seam pairs (~d/1920 of them at lag d) and read somewhat low.
+if ~strcmp(KICK_MODE, 'annealed')
+    XI.MAX_LAG = 480;
+end
 
 % ---- DOT colours, one per S band (see dot_band_index for the bands) ----
 % Hoisted out of the per-cycle loop: these are constants, and the zoom probe
@@ -395,7 +477,7 @@ TOPK_LOW_BLOBS = 5;
 % mostly reading "#5213 / 1px / r=0.6", plus ~5,700 lines of console fprintf
 % per run. Blobs are ranked by area, so the first few carry essentially all
 % of it (the 13 largest hold 82%); the rest are threshold specks.
-% blob_summary.txt still gets every row -- only the screen is capped.
+% blob_summary_<mode>.txt still gets every row -- only the screen is capped.
 TOPK_BLOB_LABELS  = 20;    % text labels drawn on figs 7001 and 8000
 TOPN_BLOB_CONSOLE = 50;    % rows printed to the console table
 
@@ -414,7 +496,20 @@ blob_area_history = cell(cycles,1);
 
 % -------------------- ADD-ON: store full SVD of monodromy --------------------
 
-cycleData = matfile("full_cycle_data.mat", "Writable", true);
+% matfile(..., "Writable", true) opens an EXISTING file and writes into it.
+% Tagging the name stops one mode mixing into another's file, but a second
+% run of the SAME mode would still write into its own previous file: any
+% variable the new run does not rewrite survives, and an array the new run
+% indexes to a smaller size keeps the old run's tail. So the file is removed
+% first and every run starts clean.
+matFileName = "full_cycle_data_" + KICK_MODE + ".mat";
+% named here, with the MAT file, because the console blob table refers to it
+% before the file itself is written
+blobSummaryName = "blob_summary_" + KICK_MODE + ".txt";
+if isfile(matFileName)
+    delete(matFileName);
+end
+cycleData = matfile(matFileName, "Writable", true);
 
 % Preallocate directly on disk
 cycleData.S(rows,cols,cycles) = single(0);
@@ -435,6 +530,10 @@ runMetadata.lc = lc;
 runMetadata.Lx = Lx;
 runMetadata.Lp = Lp;
 runMetadata.kappa   = kappa;      % K*Tau, the standard-map parameter
+runMetadata.KICK_MODE  = KICK_MODE;
+runMetadata.K_STD      = K_STD;      % used only in cosine mode
+runMetadata.kappa_eff  = kappa_eff;  % mode-aware; see the kappa block
+runMetadata.FIG_OFFSET = FIG_OFFSET;
 runMetadata.epsilon = epsilon;    % the dimensionless control knob
 runMetadata.K = K;
 runMetadata.Tau = Tau;
@@ -510,6 +609,21 @@ xi_y      = nan(cycles,1);
 xi_R2     = nan(cycles,1);   % quality of the exponential description
 
 xi_start  = nan(cycles,1);   % coherence length of the SEED-indexed field
+
+% -------------------- RE-ENTRY STATISTICS --------------------
+% Material RE-ENTERS the low-stretch set, which is why h_net is not a hazard.
+% These quantify the re-entry itself, all from the tracers (same parcel).
+haz_inflow  = nan(cycles,1);  % fraction of ALL parcels entering the low set
+haz_outflow = nan(cycles,1);  % fraction of ALL parcels leaving it
+reent_Sprev_hist = cell(cycles,1);  % S at N-1 of every parcel re-entering at N
+dwell_reent = nan(cycles,1);  % P(exit at N | entered at N-1)
+dwell_est   = nan(cycles,1);  % P(exit at N | low at both N-1 and N-2)
+age_risk    = zeros(cycles,1);  % re-entrants at risk, by cycles since entry
+age_exits   = zeros(cycles,1);  % ... and how many of them left, pooled
+% the same re-entry event measured three ways (fraction of the whole frame)
+reent_eul_magenta = nan(cycles,1);  % y2b_frac: Eulerian, as the magenta draws it
+reent_eul_exact   = nan(cycles,1);  % Eulerian, exact S_{N-1} along each orbit
+reent_lag         = nan(cycles,1);  % Lagrangian: haz_reent*haz_f
 lag_valid = false(cycles,1); % was t0 still pinned at 0 for this cycle?
 
 if LAG.ENABLE
@@ -522,6 +636,10 @@ if LAG.ENABLE
     tr_a = ones(size(tr_x));          tr_b = zeros(size(tr_x));
     tr_c = zeros(size(tr_x));         tr_d = ones(size(tr_x));
     tr_lowPrev = [];
+    tr_Sprev       = [];                        % previous cycle's S (single)
+    tr_enteredPrev = false(size(tr_x));         % entered at the previous cycle
+    tr_everLeft    = false(size(tr_x));         % has left the set at least once
+    tr_age         = zeros(size(tr_x),'uint8'); % cycles since last entry, while low
     cycleData.S_start(lag_ny, lag_nx, cycles) = single(0);
     fprintf(['Lagrangian accumulator: %d parcels at %d px seed spacing ' ...
              '(%d x %d), ~%.0f MB state + %.0f MB stored.\n'], ...
@@ -529,9 +647,53 @@ if LAG.ENABLE
             6*numel(tr_x)*8/1e6, lag_ny*lag_nx*cycles*4/1e6);
 end
 
+% -------------------- KICK MODE: what each cycle applies --------------------
+% Placed after runMetadata.rngStateBeforeKicks is captured, so that field is
+% still the state before ANY kick in every mode.
+%
+% dp_frozen is drawn ONLY in quenched mode. Drawing it unconditionally would
+% consume 959 uniforms from the seeded stream before the loop, and every
+% annealed kick after it would come from a shifted stream: emulating MATLAB's
+% twister exactly, that changes all 12 annealed kicks by up to 204 px, with
+% cycle-1 correlation 0.21 to today's -- an unrelated run. Drawn only here,
+% annealed is bit-identical to before, and the frozen kick is EXACTLY
+% annealed's cycle-1 kick (same stream position), so the quenched run differs
+% from the annealed one only in never redrawing.
+dp_frozen = [];
+dp_cos    = [];
+switch KICK_MODE
+    case 'quenched'
+        dp_frozen = K * randpot1d_four(cf_x);
+    case 'cosine'
+        dp_cos = (K_STD*cols/(2*pi*Tau)) * sin(2*pi*(0:cols-1)'/cols);
+        % one-time check of the amplitude formula. The dynamics uses the
+        % piecewise-linear kick, whose exact slope is the first difference, so
+        % max|a| = K_STD*sin(x)/x with x = 2*pi/cols -- short of K_STD by a
+        % relative x^2/6 = 1.8e-6 at cols = 1920. That is sampling, not error.
+        a_max_cos = Tau * max(abs(diff([dp_cos; dp_cos(1)])));
+        fprintf('cosine: requested K_STD = %.6f, achieved max|a| = %.6f  (diff %+.1e)\n', ...
+                K_STD, a_max_cos, a_max_cos - K_STD);
+        assert(abs(a_max_cos - K_STD) < 1e-4*K_STD, ...
+               'cosine kick amplitude is wrong: max|a| = %.6g for K_STD = %.6g.', ...
+               a_max_cos, K_STD);
+end
+
+% local standard-map parameter a = Tau*f'(x) of the kick actually applied,
+% per cycle -- the cross-mode comparator
+a_rms_cyc = nan(cycles,1);
+a_max_cyc = nan(cycles,1);
+
 for it = 1:cycles
-    % ---- new random kick profile ----
-    dp_x = K * randpot1d_four(cf_x);
+    % ---- this cycle's kick profile ----
+    switch KICK_MODE
+        case 'annealed', dp_x = K * randpot1d_four(cf_x);
+        case 'quenched', dp_x = dp_frozen;
+        case 'cosine',   dp_x = dp_cos;
+    end
+    a_loc_ = Tau * diff([dp_x; dp_x(1)]);     % exact slope of the PL kick
+    a_rms_cyc(it) = sqrt(mean(a_loc_.^2));
+    a_max_cyc(it) = max(abs(a_loc_));
+    clear a_loc_
     dp_x_hist{end+1} = dp_x; %#ok<SAGROW>
 
     % ---- advance the hazard tracers one step with THIS cycle's kick ----
@@ -589,20 +751,74 @@ for it = 1:cycles
         else
             cycleData.S_start(:,:,it) = NaN('single');
         end
-        clear S_lag_
 
         haz_f(it) = nnz(lowNow_) / numel(lowNow_);
+        newAge_ = tr_age + 1;                     % uint8 saturates, never wraps
         if ~isempty(tr_lowPrev)
+            ent_ = lowNow_ & ~tr_lowPrev;         % entered the set at this cycle
+            ext_ = tr_lowPrev & ~lowNow_;         % left it at this cycle
             nprev_ = nnz(tr_lowPrev);
             haz_nprev(it) = nprev_;
-            haz_gross(it) = nnz(tr_lowPrev & ~lowNow_) / max(nprev_, 1);
-            haz_reent(it) = nnz(lowNow_ & ~tr_lowPrev) / max(nnz(lowNow_), 1);
+            haz_gross(it) = nnz(ext_) / max(nprev_, 1);
+            haz_reent(it) = nnz(ent_) / max(nnz(lowNow_), 1);
             if haz_f(it-1) > 0
                 haz_net(it) = 1 - haz_f(it)/haz_f(it-1);
             end
+
+            if lag_valid(it)
+                % --- two opposing fluxes, as fractions of ALL parcels ---
+                haz_inflow(it)  = nnz(ent_) / numel(lowNow_);
+                haz_outflow(it) = nnz(ext_) / numel(lowNow_);
+
+                % --- where re-entrants come from ---
+                % For any step, sigma_max(J*M) >= sigma_min(J)*sigma_max(M), and
+                % det J = 1 gives sigma_min(J) = 1/sigma_max(J). So a parcel can
+                % only re-enter from S_{N-1} <= S_THR*sigma_max(J_N): one step
+                % can undo at most one step's worth of stretch. That bound is
+                % why re-entrants come from a thin shell just above S_THR.
+                % Checked over 318,221 re-entry events: zero violations, and
+                % the bound is reached (ratio 0.9999) when the step's
+                % contracting direction lines up with the accumulated stretch.
+                reent_Sprev_hist{it} = tr_Sprev(ent_);
+
+                % --- dwell: does the cohort that just entered leave faster? ---
+                est_ = tr_lowPrev & ~tr_enteredPrev;
+                if any(tr_enteredPrev)
+                    dwell_reent(it) = nnz(ext_ & tr_enteredPrev) / nnz(tr_enteredPrev);
+                end
+                if any(est_)
+                    dwell_est(it) = nnz(ext_ & est_) / nnz(est_);
+                end
+
+                % --- exit probability vs cycles since entry, re-entrants only
+                % (they have a defined entry time; the original cohort's age is
+                % just N) ---
+                mem_ = tr_lowPrev & tr_everLeft;
+                if any(mem_)
+                    ag_ = min(double(tr_age(mem_)), cycles);
+                    age_risk  = age_risk  + accumarray(ag_, 1, [cycles 1]);
+                    age_exits = age_exits + accumarray(ag_, double(ext_(mem_)), [cycles 1]);
+                end
+                reent_lag(it) = haz_reent(it) * haz_f(it);
+            end
+
+            tr_everLeft    = tr_everLeft | ext_;
+            tr_enteredPrev = ent_;
+            newAge_(ent_)  = 1;
+            clear ent_ ext_ est_ mem_ ag_
+        else
+            % First cycle. The hazard series start at N=2 by convention, but
+            % every parcel had S_0 = 1 and so was IN the set at N=0: anything
+            % not in it now has already left once. N=1 is the largest outflow
+            % of the run (~30% of all parcels), so skipping it would drop
+            % every later re-entry of that group from the age statistics.
+            tr_everLeft = ~lowNow_;
         end
+        newAge_(~lowNow_) = 0;
+        tr_age     = newAge_;
         tr_lowPrev = lowNow_;
-        clear lowNow_
+        tr_Sprev   = single(S_lag_);
+        clear lowNow_ S_lag_ newAge_
     end
 
     % ---- warp for visualization (pullback) ----
@@ -626,7 +842,7 @@ for it = 1:cycles
 
     % ---- (A) 3-panel BEFORE/KICK/DRIFT ----
     if SHOW_PANELS_EACH_CYCLE
-        figA = figure(fignum(2000, it, KEEP_FIGS_PER_CYCLE)); clf;
+        figA = figure(fignum(FIG_OFFSET + 2000, it, KEEP_FIGS_PER_CYCLE)); clf;
         set(figA,'Color','w','Position',[60 60 1500 420], ...
             'Name', sprintf('Cycle %d: before/kick/drift', it));
         tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
@@ -638,7 +854,7 @@ for it = 1:cycles
 
         nexttile; imshow(stage2_img, []); axis image off; title('AFTER DRIFT');
         drawnow;
-        save_cycle_figure(figA,    "before_kick_drift", it);
+        save_cycle_figure(figA,    "before_kick_drift", it, KICK_MODE);
     end
 
     cur = stage2_img;
@@ -653,7 +869,7 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine_final, maskFine_final, Scoarse, maskC] = ...
+        [Sfine_final, maskFine_final, Scoarse, maskC, ScoarsePrev] = ...
             Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
                             t0_recent, Nw, SParams);
         cycleData.S(:,:,it)    = Sfine_final;
@@ -700,22 +916,42 @@ for it = 1:cycles
         % one measured lattice cell stands for this many full-resolution px
         cellArea = SParams.FIELD_STEP^2;
 
-        % ---- cross-check: the two framings must agree on the AREA ----
-        % S_start indexes material by seed, blueC indexes it by current
-        % position. The map is area preserving, so the low-stretch fraction is
-        % the same quantity measured two independent ways -- different orbits,
-        % different lattices, one shared invariant. They agree statistically,
-        % not exactly, so the tolerance is loose on purpose: measured worst
-        % |f_start - f_now| was 0.0062 over 12 cycles x 5 kick realisations,
-        % and a genuinely broken sweep would miss by 0.5 or more.
+        % ---- cross-check: do the two framings agree on the AREA? ----
+        % S_start indexes material by seed, blueC by current position. They
+        % are the low-stretch fraction of two DIFFERENT sets of initial
+        % conditions: the window W, and its preimage T^-N(W). Area
+        % preservation makes those two sets the same size, but it only makes
+        % the fractions equal when W is INVARIANT -- and the display window is
+        % not: material flows in and out through its top and bottom edges.
+        %
+        % The invariant domain is one full momentum period. Every mode is
+        % exactly periodic in y with period cols/Tau (shifting y by that moves
+        % the next drift by exactly cols), which here is 3840 px, twice the
+        % 1920 px window. On a full period the two fractions agree to +-0.0001
+        % in ALL three modes. On the half-period window they agree only
+        % through statistical homogeneity in y:
+        %   annealed   independent stationary kicks are homogeneous in y, so
+        %              they track: worst |diff| 0.0062 over 12 cycles x 5
+        %              realisations. A miss here really does mean a broken
+        %              sweep, so this stays a hard assert.
+        %   quenched / cosine   one fixed kick has resonances at fixed momenta,
+        %              and the window cuts through them. Cosine at K_STD=0.5
+        %              puts the main island mid-window and differs by 0.0243 at
+        %              N=3 -- physics, not a bug. Printed, not asserted.
         if LAG.ENABLE && lag_valid(it) && nnz(validC) > 0
             f_start_ = mean(cycleData.S_start(:,:,it) <= SParams.S_THR, 'all');
             f_now_   = nnz(blueC) / nnz(validC);
-            assert(abs(f_start_ - f_now_) < 0.02, ...
-                   ['cycle %d: S_start and S_now disagree on the low-stretch ' ...
-                    'fraction (%.5f vs %.5f). Area preservation says they ' ...
-                    'cannot; one of the two sweeps is wrong.'], ...
-                   it, f_start_, f_now_);
+            if strcmp(KICK_MODE, 'annealed')
+                assert(abs(f_start_ - f_now_) < 0.02, ...
+                       ['cycle %d: S_start and S_now disagree on the low-stretch ' ...
+                        'fraction (%.5f vs %.5f). For annealed kicks they track ' ...
+                        'to ~0.006; one of the two sweeps is wrong.'], ...
+                       it, f_start_, f_now_);
+            else
+                fprintf(['  low fraction: seed-indexed %.5f | current-position %.5f ' ...
+                         '(%+.4f; not expected to match in %s mode)\n'], ...
+                        f_start_, f_now_, f_start_ - f_now_, KICK_MODE);
+            end
         end
 
         % ---- coherence length of log S on the measured lattice ----
@@ -784,6 +1020,42 @@ for it = 1:cycles
         y2b_area_px(it) = nnz(y2bMask_final);
         denom = nnz(valid);
         if denom > 0, y2b_frac(it) = y2b_area_px(it) / denom; else, y2b_frac(it) = 0; end
+
+        % ---- the same re-entry event, measured three independent ways ----
+        % magenta : Eulerian, as drawn -- one step back, wrap, bilinear read
+        %           of last cycle's field (y2b_frac above)
+        % exact   : Eulerian, S_{N-1} read off each pixel's OWN orbit inside
+        %           this cycle's sweep -- no step back, no wrap, no interpolation
+        % tracers : Lagrangian, haz_reent*haz_f
+        % They should track. Measured on this run's kicks, exact agrees with
+        % the tracers to within +-3% at every cycle, and the magenta runs 4-13%
+        % HIGH. Two causes, both in the magenta path:
+        %   * y wraps at rows, but the dynamics is not periodic in y with that
+        %     period (shifting y by rows moves the next drift by Tau*rows =
+        %     cols/2, half a period in x). For the ~2% of pixels whose step back
+        %     crosses the top or bottom edge, the wrap reads an unrelated
+        %     parcel. That is all of the excess up to N=7.
+        %   * the bilinear read interpolates S, a log-normal field, across
+        %     gradients that steepen as it filaments. Negligible early, it is
+        %     +7% by N=12 and overtakes the wrap.
+        % The magenta overlay is left exactly as it was so annealed output
+        % stays bit-identical; these numbers say how far to trust it.
+        %
+        % In quenched or cosine mode only the magenta-vs-exact comparison keeps
+        % its meaning: both are Eulerian, over the material currently in the
+        % window. The tracers count the material that STARTED there, which for
+        % a structured map is a different population (see the area
+        % cross-check above), so exact-vs-tracers can legitimately part.
+        reent_eul_magenta(it) = y2b_frac(it);
+        if it > 1 && ~isempty(ScoarsePrev) && nnz(validC) > 0
+            reent_eul_exact(it) = nnz(blueC & (ScoarsePrev > SParams.S_THR)) / nnz(validC);
+        end
+        clear ScoarsePrev
+        if it > 1
+            fprintf(['  re-entry, fraction of frame: magenta %.5f | exact Eulerian %.5f ' ...
+                     '| tracers %.5f\n'], ...
+                    reent_eul_magenta(it), reent_eul_exact(it), reent_lag(it));
+        end
         cycleData.y2bMask(:,:,it) = y2bMask_final;
 
         % -------------------- low-stretch blob areas this cycle --------------------
@@ -884,7 +1156,7 @@ for it = 1:cycles
             it, SParams.S_THR, area_blue_px(it), frac_blue(it), n_blue_blobs(it), ...
             area_yellow_px(it), frac_yellow(it), n_yellow_blobs(it));
 
-        figS = figure(fignum(5000, it, KEEP_FIGS_PER_CYCLE)); clf;
+        figS = figure(fignum(FIG_OFFSET + 5000, it, KEEP_FIGS_PER_CYCLE)); clf;
         set(figS,'Color','w','Position',[1000 80 900 900], ...
             'Name', sprintf('Cycle %d: S-field at CURRENT locations (banded regions)', it));
 
@@ -977,11 +1249,11 @@ for it = 1:cycles
 
         hold off;
         drawnow;
-        save_cycle_figure(figS,    "banded_S_field", it);
+        save_cycle_figure(figS,    "banded_S_field", it, KICK_MODE);
 
         % ---- S-field at CURRENT (FINAL) locations: standalone heatmap ----
         if ~isempty(Sfine_final)
-            figSF = figure(fignum(5500, it, KEEP_FIGS_PER_CYCLE)); clf;
+            figSF = figure(fignum(FIG_OFFSET + 5500, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figSF,'Color','w','Position',[1050 80 900 900], ...
                 'Name', sprintf('Cycle %d: S-field at CURRENT locations', it));
 
@@ -1010,14 +1282,14 @@ for it = 1:cycles
 
             hold off;
             drawnow;
-            save_cycle_figure(figSF,   "continuous_S_field", it);
+            save_cycle_figure(figSF,   "continuous_S_field", it, KICK_MODE);
         end
 
         % ---- 3-PANEL HISTOGRAM of S distribution per cycle ----
         if ~isempty(Sfine_final)
             Svals = Sfine_final(maskFine_final & isfinite(Sfine_final));
 
-            figH = figure(fignum(7000, it, KEEP_FIGS_PER_CYCLE)); clf;
+            figH = figure(fignum(FIG_OFFSET + 7000, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figH,'Color','w','Position',[80 540 2350 420], ...
                 'Name', sprintf('Cycle %d: S-distribution histograms', it));
             tiledlayout(1,5,'TileSpacing','compact','Padding','compact');
@@ -1147,10 +1419,10 @@ for it = 1:cycles
             sgtitle(sprintf('Cycle %d: S-level distributions  (total valid=%d)  log-caxis=[%.2f, %.2f]', ...
                     it, numel(Svals), cax_lo, cax_hi), 'FontWeight','bold');
             drawnow;
-            save_cycle_figure(figH,    "S_histograms", it);
+            save_cycle_figure(figH,    "S_histograms", it, KICK_MODE);
 
             % ---- PER-CYCLE BLOB MAP (mirrors final blob figure 7001) ----
-            figBlob = figure(fignum(8000, it, KEEP_FIGS_PER_CYCLE)); clf;
+            figBlob = figure(fignum(FIG_OFFSET + 8000, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figBlob,'Color','w','Position',[100 60 1100 950], ...
                 'Name', sprintf('Cycle %d: S-field + numbered low-stretch blobs', it));
             hImB = imagesc(Sfine_final);
@@ -1230,7 +1502,7 @@ for it = 1:cycles
                 end
             end
             hold off; drawnow;
-            save_cycle_figure(figBlob, "blob_map", it);
+            save_cycle_figure(figBlob, "blob_map", it, KICK_MODE);
 
         end
     else
@@ -1252,7 +1524,7 @@ for it = 1:cycles
 
         % ============ FIGURE: S-field at CURRENT (FINAL) locations on kick-drift map ============
         if ~isempty(Sfine_final)
-            figC = figure(fignum(4000, it, KEEP_FIGS_PER_CYCLE)); clf;
+            figC = figure(fignum(FIG_OFFSET + 4000, it, KEEP_FIGS_PER_CYCLE)); clf;
             set(figC,'Color','w','Position',[100 100 900 900], ...
                 'Name', sprintf('Cycle %d: S-field at CURRENT locations (on kick-drift)', it));
 
@@ -1294,7 +1566,7 @@ for it = 1:cycles
 
             hold off;
             drawnow;
-            save_cycle_figure(figC,    "S_on_kick_drift", it);
+            save_cycle_figure(figC,    "S_on_kick_drift", it, KICK_MODE);
         end
 
         % store for next cycle comparison
@@ -1321,14 +1593,14 @@ for it = 1:cycles
     if ZOOM.ENABLE && ~isempty(ZOOM.WINDOWS)
         for wIdx = 1:size(ZOOM.WINDOWS, 1)
             [nKeptZ, figZ, nTotZ, spZ] = zoom_probe_figure( ...
-                fignum(9000 + 100*wIdx, it, KEEP_FIGS_PER_CYCLE), ...
+                fignum(FIG_OFFSET + 9000 + 100*wIdx, it, KEEP_FIGS_PER_CYCLE), ...
                 sprintf('Cycle %d: zoom probe grid %d', it, wIdx), ...
                 stage2_img, ZOOM.WINDOWS(wIdx,:), ZOOM, ...
                 dp_x_hist, row0, Tau, rows, cols, t0_recent, Nw, ...
                 dot_cmap, dot_band_labels, ...
                 sprintf('cycle %d zoom %d', it, wIdx));
 
-            save_cycle_figure(figZ, sprintf("zoom_probes_w%d", wIdx), it);
+            save_cycle_figure(figZ, sprintf("zoom_probes_w%d", wIdx), it, KICK_MODE);
             fprintf('  zoom %d: %d of %d probes in band (spacing %d px)\n', ...
                     wIdx, nKeptZ, nTotZ, spZ);
         end
@@ -1355,6 +1627,18 @@ cycleData.blob_area_history = blob_area_history;
 cycleData.lag_valid = lag_valid;
 cycleData.xi_start  = xi_start;
 cycleData.haz_f     = haz_f;
+cycleData.haz_inflow  = haz_inflow;
+cycleData.haz_outflow = haz_outflow;
+cycleData.reent_Sprev_hist = reent_Sprev_hist;  % S at N-1 of each re-entrant
+cycleData.dwell_reent = dwell_reent;
+cycleData.dwell_est   = dwell_est;
+cycleData.age_risk    = age_risk;
+cycleData.age_exits   = age_exits;
+cycleData.reent_eul_magenta = reent_eul_magenta;
+cycleData.reent_eul_exact   = reent_eul_exact;
+cycleData.reent_lag         = reent_lag;
+cycleData.a_rms_cycle = a_rms_cyc;   % rms of Tau*f'(x): the cross-mode comparator
+cycleData.a_max_cycle = a_max_cyc;
 cycleData.haz_gross = haz_gross;
 cycleData.haz_net   = haz_net;
 cycleData.haz_reent = haz_reent;
@@ -1371,7 +1655,7 @@ fprintf('\nSim done: frames=%d, kicks=%d\n', n_frames, numel(dp_x_hist));
 % -------------------- ADD-ON: save full SVD history --------------------
 
 % -------------------- NEW FIGURE: blue/yellow area vs cycle --------------------
-figure(6001); clf;
+figure(FIG_OFFSET + 6001); clf;
 set(gcf,'Color','w','Position',[120 80 720 420], 'Name','S-field blue/yellow area vs cycle');
 
 plot(1:cycles, frac_blue,   'o-','LineWidth',1.5); hold on;
@@ -1388,7 +1672,7 @@ legend('blue (low-stretch)','yellow (stretched)','Location','best');
 % ===================== EXTRA FIGURES: AREA + BLOBS vs CYCLE =====================
 
 % Figure: total area (fraction) blue/yellow vs cycle
-figure(6100); clf; set(gcf,'Color','w','Position',[100 80 900 420], 'Name','S-field area vs cycle');
+figure(FIG_OFFSET + 6100); clf; set(gcf,'Color','w','Position',[100 80 900 420], 'Name','S-field area vs cycle');
 tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
 
 nexttile;
@@ -1409,7 +1693,7 @@ legend('blue area','yellow area','Location','best');
 
 
 % ============ FIGURE: magenta transition area vs cycle ============
-figure(6300); clf;
+figure(FIG_OFFSET + 6300); clf;
 set(gcf,'Color','w','Position',[120 80 900 420], ...
     'Name', sprintf('Dropped below S<=%.2f (same material) vs cycle', SParams.S_THR));
 tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
@@ -1427,7 +1711,7 @@ xlabel('cycle'); ylabel('pixels (full-res)');
 title('Same, as pixel area');
 
 % ===================== ADD-ON FIGURE: all low-stretch blobs total area vs cycle =====================
-figure(6400); clf;
+figure(FIG_OFFSET + 6400); clf;
 set(gcf,'Color','w','Position',[140 100 850 450], ...
     'Name','All low-stretch blobs total area vs cycle');
 
@@ -1528,9 +1812,14 @@ for iq = 1:cycles
 end
 eA = sigLogA(iStart:iEnd);
 eA(~isfinite(eA) | eA <= 0) = NaN;
-% points with no usable sigma still get fitted, at the median weight
-eA(isnan(eA)) = median(eA(~isnan(eA)));
-if all(isnan(eA)), eA(:) = 1; end
+% points with no usable sigma still get fitted, at the median weight; with
+% none usable at all, the fit falls back to unweighted. (Explicit, rather than
+% leaning on median([]) returning NaN.)
+if any(~isnan(eA))
+    eA(isnan(eA)) = median(eA(~isnan(eA)));
+else
+    eA(:) = 1;
+end
 
 if nnz(goodA) >= 2
     wA = 1 ./ eA(goodA).^2;
@@ -1557,7 +1846,7 @@ fprintf(['Low-stretch area fit: slope k = %.4f +- %.4f per cycle | ' ...
 % interpolated value exactly at the intersection cycle
 yA_cross = interp1(1:cycles, area_blue_px, cStar, 'linear', 'extrap');
 
-figure(6500); clf;
+figure(FIG_OFFSET + 6500); clf;
 set(gcf,'Color','w','Position',[120 100 1150 430], ...
     'Name','Low-stretch area decay starting at actual blue/yellow intersection cycle');
 tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
@@ -1660,9 +1949,9 @@ if ~isempty(haveB)
         if sum(wsum) > 0, Har(q,:) = wsum / sum(wsum); end
     end
 
-    figure(6800); clf;
+    figure(FIG_OFFSET + 6800); clf;
     set(gcf,'Color','w','Position',[80 80 1500 470], ...
-        'Name','Distribution of low-stretch blob areas across cycles');
+        'Name','Blob-area distribution across cycles (see fig 6801 for per-cycle bars)');
     tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
     cmapC = parula(max(numel(haveB),2));
 
@@ -1697,6 +1986,47 @@ if ~isempty(haveB)
     xlabel('blob area (px^2)'); ylabel('cycle');
     title('Fragmentation map: cycle vs area');
 
+    % ---------------- Figure 6801: THE HISTOGRAM, one panel per cycle -------
+    % Figure 6800 above compares cycles by drawing each distribution as an
+    % outline, which is readable as a comparison but is not a histogram. This
+    % is: real bars, one panel per cycle, so the distribution at each cycle can
+    % be read on its own and the sequence shows the drift.
+    %
+    % Bins are shared across all panels (same log-spaced edges) so the panels
+    % are directly comparable -- per-panel binning would make each cycle look
+    % alike regardless of how the areas actually moved. Both axes are log: the
+    % areas span 3-5 decades and the counts span 4.
+    figure(FIG_OFFSET + 6801); clf;
+    nC  = numel(haveB);
+    ncH = min(4, nC);
+    nrH = ceil(nC/ncH);
+    set(gcf,'Color','w', ...
+        'Position',[60 60 min(360*ncH,1560) min(300*nrH,980)], ...
+        'Name','Histogram of low-stretch blob areas, per cycle');
+    tiledlayout(nrH, ncH, 'TileSpacing','compact','Padding','compact');
+
+    yTop = max(1, max(Hcnt(:)));
+    for q = 1:nC
+        nexttile;
+        a = blob_area_history{haveB(q)};
+        histogram('BinEdges', edges, 'BinCounts', Hcnt(q,:), ...
+                  'FaceColor', cmapC(q,:), 'EdgeColor','none', 'FaceAlpha',0.95);
+        hold on;
+        med_q = median(a);
+        xline(med_q, 'k--', 'LineWidth',1.2);
+        set(gca,'XScale','log','YScale','log');
+        xlim([edges(1) edges(end)]);
+        ylim([0.7 yTop*1.5]);            % shared, so panels are comparable
+        grid on;
+        title(sprintf('cycle %d:  n=%d,  med=%.0f,  max=%.0f px^2', ...
+                      haveB(q), numel(a), med_q, max(a)), 'FontSize', 9);
+        if q > nC - ncH, xlabel('blob area (px^2)'); end
+        if mod(q-1, ncH) == 0, ylabel('number of blobs'); end
+    end
+    sgtitle(sprintf(['Low-stretch (S \\leq %.1f) blob-area distribution per cycle' ...
+                     '   |   shared log bins, dashed line = median'], ...
+                    SParams.S_THR), 'FontWeight','bold');
+
     fprintf('\nLow-stretch blob-area distribution:\n');
     fprintf('  %-6s %-8s %-9s %-9s %-11s %-11s %s\n', ...
             'cycle','nblobs','median','p90','max','top1 %area','%area <4px');
@@ -1721,7 +2051,7 @@ if LAG.ENABLE && any(lag_valid)
     itL = find(lag_valid, 1, 'last');
     Sst = double(cycleData.S_start(:,:,itL));
 
-    figure(6900); clf;
+    figure(FIG_OFFSET + 6900); clf;
     set(gcf,'Color','w','Position',[100 80 1150 560], ...
         'Name','Lagrangian S indexed by SEED position');
     tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
@@ -1756,7 +2086,7 @@ end
 %%  Figure 6600: COHERENCE LENGTH xi(N)
 %% ------------------------------------------------------------------------
 if XI.ENABLE && any(isfinite(xi_rad))
-    figure(6600); clf;
+    figure(FIG_OFFSET + 6600); clf;
     set(gcf,'Color','w','Position',[120 100 1150 430], ...
         'Name','Coherence length of log S vs cycle');
     tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
@@ -1838,10 +2168,10 @@ if LAG.ENABLE && any(isfinite(haz_gross))
         end
     end
 
-    figure(6700); clf;
-    set(gcf,'Color','w','Position',[120 100 1150 430], ...
+    figure(FIG_OFFSET + 6700); clf;
+    set(gcf,'Color','w','Position',[80 100 1650 430], ...
         'Name','Hazard rate h(N): flat = memoryless, declining = structure');
-    tiledlayout(1,2,'TileSpacing','compact','Padding','compact');
+    tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
 
     nexttile;
     errorbar(Nh, hg, ehg, 'o-', 'LineWidth',1.8, 'CapSize',5); hold on;
@@ -1873,6 +2203,35 @@ if LAG.ENABLE && any(isfinite(haz_gross))
            'h_{net} = 1 - f(N)/f(N-1)', 'Location','best');
     ylim([0 1]);
 
+    % --- fluxes: inflow and outflow separately, not just their difference ---
+    % Measured on this system the balance shifts over the run: at N=2 the net
+    % change is 86% of the outflow (the set is mostly draining, inflow 0.029
+    % against outflow 0.202 of all parcels), by N=12 only 37% (0.016 in, 0.025
+    % out). It starts as a drain and becomes an exchange -- two comparable
+    % opposing fluxes with a small residual. That approach to balance is the
+    % thing the net curve alone cannot show.
+    nexttile;
+    fin  = haz_inflow(Nh);  fout = haz_outflow(Nh);
+    plot(Nh, 100*fout, 'v-', 'LineWidth',1.8, 'Color',[0.85 0.33 0.10]); hold on;
+    plot(Nh, 100*fin,  '^-', 'LineWidth',1.8, 'Color',[0.00 0.45 0.74]);
+    plot(Nh, 100*(fin - fout), 'k:', 'LineWidth',1.6);
+    yline(0, 'k-', 'LineWidth',0.5, 'HandleVisibility','off');
+    grid on;
+    xlabel('window length  N');
+    ylabel('% of ALL parcels per step');
+    legend('outflow (left the set)', 'inflow (re-entered)', ...
+           'net = inflow - outflow', 'Location','best');
+    okf = isfinite(fin) & isfinite(fout) & fout > 0;
+    if any(okf)
+        rb = abs(fin(okf) - fout(okf)) ./ fout(okf);
+        title({'Two opposing fluxes, small residual', ...
+               sprintf('|net|/outflow: %.2f at N=%d  ->  %.2f at N=%d', ...
+                       rb(1), Nh(find(okf,1,'first')), rb(end), Nh(find(okf,1,'last')))}, ...
+              'FontSize', 9);
+    else
+        title('Two opposing fluxes', 'FontSize', 9);
+    end
+
     nexttile;
     plot(Nh, 100*rr, 'o-', 'LineWidth',1.6); hold on;
     grid on;
@@ -1883,15 +2242,121 @@ if LAG.ENABLE && any(isfinite(haz_gross))
           'FontSize', 9);
 
     % The tracers index material by INITIAL condition while the field indexes
-    % it by FINAL position. The map is area preserving, so the two must report
-    % the same low-stretch fraction; printing both is a live check that the
-    % tracer lattice really is describing the same population as the field.
+    % it by FINAL position. For annealed kicks the two track closely, which is
+    % a live check that the tracers describe the same population as the field;
+    % in quenched or cosine mode they need not (see the cross-check in the
+    % loop: the window is half a momentum period of a structured map).
     fprintf('\n  %-5s %-11s %-11s %-13s %-9s %-9s %s\n', ...
             'N','h_gross','h_net','re-entrants','f_tracer','f_field','n_prev');
     for q = 1:numel(Nh)
         fprintf('  %-5d %-11.4f %-11.4f %-12.1f%% %-9.5f %-9.5f %d\n', ...
                 Nh(q), hg(q), hn(q), 100*rr(q), ...
                 haz_f(Nh(q)), frac_blue(Nh(q)), np(q));
+    end
+end
+
+%% ------------------------------------------------------------------------
+%%  Figure 6710: RE-ENTRY -- where it comes from, how long it lasts, and
+%%  whether the two independent measurements of it agree
+%% ------------------------------------------------------------------------
+haveR = find(~cellfun(@isempty, reent_Sprev_hist(:)'));
+if LAG.ENABLE && ~isempty(haveR)
+    figure(FIG_OFFSET + 6710); clf;
+    set(gcf,'Color','w','Position',[80 100 1650 450], ...
+        'Name','Re-entry into the low-stretch set');
+    tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
+
+    % --- (1) S at N-1 of the parcels that re-entered ---
+    % A parcel can only re-enter from S_{N-1} <= S_THR*sigma_max(J_N), since
+    % one step can undo at most one step of stretch. Measured: pooled median
+    % 2.22, ~80% from within 0.5 of S_THR, tail to ~5.5 where the kick slope
+    % is steepest.
+    nexttile;
+    allSp = double(vertcat(reent_Sprev_hist{haveR}));
+    upperS = max(SParams.S_THR + 0.5, min(max(allSp), 8));
+    histogram(allSp, linspace(SParams.S_THR, upperS, 61), ...
+              'FaceColor',[0.30 0.55 0.85], 'EdgeColor','none', ...
+              'Normalization','probability');
+    hold on;
+    xline(median(allSp), 'k--', sprintf('median %.3f', median(allSp)), ...
+          'LineWidth',1.4, 'LabelVerticalAlignment','top');
+    grid on;
+    xlabel('S at N-1 of a parcel that re-entered at N');
+    ylabel('share of re-entry events');
+    title({sprintf('Where re-entrants come from  (n = %d, cycles %d-%d)', ...
+                   numel(allSp), haveR(1), haveR(end)), ...
+           sprintf('%.0f%% from S \\leq %.1f  --  bounded by S_{THR}\\cdot\\sigma_{max}(J_N)', ...
+                   100*mean(allSp <= SParams.S_THR + 0.5), SParams.S_THR + 0.5)}, ...
+          'FontSize', 9);
+
+    % --- (2) dwell: do re-entrants churn straight back out? ---
+    % If the parcels that just entered left much faster than established
+    % members, the set would carry a permanent transient population rather
+    % than genuine recoveries. Measured: they do not -- exit rate of the
+    % just-entered cohort over the established one averages ~1.04 with
+    % +-0.13 scatter between cycles, and exit probability stays ~0.33-0.41 at
+    % every age since entry. Memoryless, consistent with the flat hazard.
+    nexttile;
+    Nd = (1:cycles)';
+    okd = isfinite(dwell_reent) & isfinite(dwell_est);
+    plot(Nd(okd), dwell_reent(okd), 'o-', 'LineWidth',1.7); hold on;
+    plot(Nd(okd), dwell_est(okd),   's-', 'LineWidth',1.7);
+    okA = age_risk > 0;
+    agesA = find(okA);
+    hA = age_exits(okA) ./ age_risk(okA);
+    plot(agesA, hA, 'd:', 'LineWidth',1.4, 'Color',[0.47 0.67 0.19]);
+    grid on; ylim([0 1]);
+    xlabel('N  (solid)   /   cycles since re-entry  (dotted)');
+    ylabel('probability of leaving at the next step');
+    legend('just re-entered (entered at N-1)', 'established (in at N-1 and N-2)', ...
+           're-entrants by age since entry', 'Location','best');
+    if any(okd)
+        ratioD = dwell_reent(okd) ./ dwell_est(okd);
+        title({'Dwell: do re-entrants leave faster?', ...
+               sprintf('just-entered / established exit rate: %.2f \\pm %.2f', ...
+                       mean(ratioD), std(ratioD))}, 'FontSize', 9);
+    else
+        title('Dwell: do re-entrants leave faster?', 'FontSize', 9);
+    end
+
+    % --- (3) consistency: the same event measured three ways ---
+    nexttile;
+    Nc = (2:cycles)';
+    plot(Nc, 100*reent_eul_magenta(Nc), 'o-', 'LineWidth',1.6); hold on;
+    plot(Nc, 100*reent_eul_exact(Nc),   's-', 'LineWidth',1.6);
+    plot(Nc, 100*reent_lag(Nc),         'd--','LineWidth',1.6);
+    grid on;
+    xlabel('cycle');
+    ylabel('re-entering material  (% of frame)');
+    legend('magenta overlay (Eulerian, step back + wrap + interp)', ...
+           'exact Eulerian (S_{N-1} along each orbit)', ...
+           'tracers (Lagrangian, h_{reent} \cdot f)', 'Location','best');
+    okc = isfinite(reent_eul_magenta(Nc)) & isfinite(reent_eul_exact(Nc)) ...
+          & isfinite(reent_lag(Nc)) & reent_lag(Nc) > 0;
+    if any(okc)
+        rm = reent_eul_magenta(Nc(okc)) ./ reent_lag(Nc(okc));
+        rx = reent_eul_exact(Nc(okc))   ./ reent_lag(Nc(okc));
+        title({'One event, three measurements', ...
+               sprintf('magenta/tracers %.2f-%.2f   |   exact/tracers %.2f-%.2f', ...
+                       min(rm), max(rm), min(rx), max(rx))}, 'FontSize', 9);
+    else
+        title('One event, three measurements', 'FontSize', 9);
+    end
+
+    fprintf('\nRe-entry: S at N-1 of re-entrants, per cycle\n');
+    fprintf('  %-5s %-8s %-8s %-8s %-8s %s\n','N','n','median','p10','p90','<= S_THR+0.5');
+    for q = haveR
+        v = double(reent_Sprev_hist{q});
+        fprintf('  %-5d %-8d %-8.3f %-8.2f %-8.2f %.1f%%\n', q, numel(v), median(v), ...
+                pct_nt(v,10), pct_nt(v,90), 100*mean(v <= SParams.S_THR + 0.5));
+    end
+    fprintf('\nRe-entry measured three ways (fraction of frame)\n');
+    fprintf('  %-5s %-10s %-10s %-10s %-14s %s\n', ...
+            'N','magenta','exact','tracers','magenta/trac','exact/trac');
+    for q = Nc'
+        fprintf('  %-5d %-10.5f %-10.5f %-10.5f %-14.2f %.2f\n', q, ...
+                reent_eul_magenta(q), reent_eul_exact(q), reent_lag(q), ...
+                reent_eul_magenta(q)/reent_lag(q), reent_eul_exact(q)/reent_lag(q));
     end
 end
 
@@ -1911,7 +2376,7 @@ end
 %%
 %%  Written outputs
 %%  ---------------
-%%  blob_summary.txt - full ranked table including all fields above.
+%%  blob_summary_<mode>.txt - full ranked table including all fields above.
 %% ========================================================================
 fprintf('\n');
 fprintf('=============================================================\n');
@@ -2050,8 +2515,8 @@ for k = 1:nShow
             blob_cx(k), blob_cy(k), blob_r_eq(k), blob_compact(k));
 end
 if nF > nShow
-    fprintf('  ... %d smaller blob(s) not shown; full table in blob_summary.txt\n', ...
-            nF - nShow);
+    fprintf('  ... %d smaller blob(s) not shown; full table in %s\n', ...
+            nF - nShow, blobSummaryName);
     fprintf('      (shown blobs hold %.4f of the valid field, all blobs %.4f)\n', ...
             sum(blob_frac(1:nShow)), sum(blob_frac));
 end
@@ -2061,8 +2526,8 @@ fprintf('  Total low-stretch blob area : %d px  (%.4f of valid field)\n', ...
         sum(blob_area), sum(blob_frac));
 fprintf('=============================================================\n\n');
 
-%% -- write blob_summary.txt --
-fid = fopen('blob_summary.txt','w');
+%% -- write blob_summary_<mode>.txt --
+fid = fopen(blobSummaryName,'w');
 fprintf(fid,'FINAL LOW-STRETCH BLOB SUMMARY\n');
 fprintf(fid,'Simulation: cycles=%d | Nwin=%d | S_THR=%.2f\n', ...
         cycles, Nw_fin, SParams.S_THR);
@@ -2085,14 +2550,14 @@ end
 fprintf(fid,'\nTotal low-stretch blob area: %d px  (%.6f of valid field)\n', ...
         sum(blob_area), sum(blob_frac));
 fclose(fid);
-fprintf('Blob table written to  blob_summary.txt\n\n');
+fprintf('Blob table written to  %s\n\n', blobSummaryName);
 
 %% ========================================================================
 %%  F)  Final analysis figures
 %% ========================================================================
 
 %% -- Fig 7001: Final S-field + S_THR contour + numbered blob overlays --
-figure(7001); clf;
+figure(FIG_OFFSET + 7001); clf;
 set(gcf,'Color','w','Position',[100 60 1100 950], ...
     'Name', sprintf('Final s_1 field + blob map  (cycle %d)', cycles));
 hIm = imagesc(Sfin);
@@ -2141,7 +2606,7 @@ end
 hold off; drawnow;
 
 
-fprintf('All figures generated.  blob_summary.txt written.\n');
+fprintf('All figures generated.  %s written.\n', blobSummaryName);
 
 % ====================== Local functions (end of file) ======================
 
@@ -2561,7 +3026,7 @@ stats = struct('n_low', nnz(isLow), 'n_high', nnz(isHigh), ...
                'n_probes', nP, 'n_rejected', nnz(~ok));
 end
 
-function [Sfine_final, maskFine_final, Scoarse, maskC] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+function [Sfine_final, maskFine_final, Scoarse, maskC, ScoarsePrev] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
 % Stretching field S on a regular grid of FINAL (current) positions.
 %
 % Each grid point is integrated BACKWARD Nwin steps to its initial
@@ -2605,6 +3070,11 @@ xs = 1:step:W;
 ny = numel(ys); nx = numel(xs);
 
 Scoarse = nan(ny, nx);
+% ScoarsePrev: S_{N-1} of the parcel at each lattice point, along its own
+% orbit -- the exact "was it above threshold last cycle" for the re-entry
+% consistency check, with no step-back, no wrap and no interpolation.
+wantPrev = (nargout >= 5);
+if wantPrev, ScoarsePrev = nan(ny, nx, 'single'); else, ScoarsePrev = []; end
 maskC   = false(ny, nx);
 Nw      = floor(Nwin);
 
@@ -2642,7 +3112,13 @@ for p0 = 1:blk:nTot
     % past DET_TOL, while S there is still exact to 0.0000%; testing it
     % would throw away good measurements for a rounding artefact.
     % Overflow is the one real failure mode and isfinite catches it.
-    Sblk = S_at_final_positions(y, x, t0, Nw, dp_x_hist, Tau, row0);
+    if wantPrev
+        [Sblk, SpBlk] = S_at_final_positions(y, x, t0, Nw, dp_x_hist, Tau, row0);
+        ScoarsePrev(idx) = single(SpBlk);
+        clear SpBlk
+    else
+        Sblk = S_at_final_positions(y, x, t0, Nw, dp_x_hist, Tau, row0);
+    end
 
     ok = isfinite(Sblk);
     Scoarse(idx(ok)) = Sblk(ok);
@@ -2776,7 +3252,7 @@ fx=x-x0;
 dpy = dp_x(i0+1) + (dp_x(i1+1)-dp_x(i0+1))*fx;
 end
 
-function S = S_at_final_positions(y, x, t0, Nw, dp_hist, Tau, row0)
+function [S, Sprev] = S_at_final_positions(y, x, t0, Nw, dp_hist, Tau, row0)
 % S for points given by their FINAL (current) positions: integrate each point
 % BACKWARD Nw steps to its initial condition, then run the forward monodromy
 % along that orbit. Vectorised over a column of points.
@@ -2798,10 +3274,14 @@ for k = Nw-1 : -1 : 0
     y  = y - (d0 + (dp(mod(i0+1, n)+1) - d0) .* (x - xf));
 end
 
-S = monodromy_S_vec(y, x, t0, Nw, dp_hist, Tau, row0);
+if nargout >= 2
+    [S, ~, ~, Sprev] = monodromy_S_vec(y, x, t0, Nw, dp_hist, Tau, row0);
+else
+    S = monodromy_S_vec(y, x, t0, Nw, dp_hist, Tau, row0);
+end
 end
 
-function [S, xN, yN] = monodromy_S_vec(y0, x0, t0, N, dp_hist, Tau, row0)
+function [S, xN, yN, Sprev] = monodromy_S_vec(y0, x0, t0, N, dp_hist, Tau, row0)
 % Exact monodromy by the chain rule, vectorised over a column of initial
 % conditions, returning sigma_max and the final positions. Replaces a
 % 5-trajectory central difference (base, +-eps in x, +-eps in y).
@@ -2857,7 +3337,18 @@ x = double(x0(:)); y = double(y0(:));
 a = ones(size(x));  b = zeros(size(x));      % M = [a b ; c d], the identity
 c = zeros(size(x)); d = ones(size(x));
 
+wantPrev = (nargout >= 4);
+Sprev = [];
 for k = 0:(floor(N)-1)
+    % Optional: S after N-1 steps along THIS orbit, read off the running
+    % monodromy just before the last step. Pure read -- a, b, c, d are not
+    % touched, so S itself is bit-identical whether or not it is requested.
+    if wantPrev && k == floor(N)-1
+        tp_   = a.*a + b.*b + c.*c + d.*d;
+        Sprev = (sqrt(tp_ + 2) + sqrt(max(tp_ - 2, 0))) / 2;
+        clear tp_
+    end
+
     dp = dp_hist{mod(t0 + k, T) + 1};
     n  = numel(dp);
 
@@ -3168,13 +3659,15 @@ b2 = linspace(1.00, 0.15, N-half).';
 cmap = [r1 g1 b1; r2 g2 b2];
 end
 
-function save_cycle_figure(fig, plotName, cycle)
+function save_cycle_figure(fig, plotName, cycle, kickMode)
+% kickMode is part of the filename so runs in different modes never
+% overwrite each other's figures.
     folder = "saved_cycle_figures";
 
     if ~isfolder(folder)
         mkdir(folder)
     end
 
-    filename = sprintf("%s_cycle_%02d.fig", plotName, cycle);
+    filename = sprintf("%s_%s_cycle_%02d.fig", plotName, kickMode, cycle);
     savefig(fig, fullfile(folder, filename));
 end
