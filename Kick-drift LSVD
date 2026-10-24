@@ -2606,6 +2606,99 @@ end
 hold off; drawnow;
 
 
+%% ------------------------------------------------------------------------
+%%  Figure 6950: THE POTENTIAL behind the kicks
+%% ------------------------------------------------------------------------
+% The kick is the impulse of a delta-kicked potential: H = p^2/2 + V(X)*sum
+% delta(t-n) gives p' = p - V'(X), so the kick is MINUS the slope of V and
+%     V(x) = - integral dp_x dx.
+% Integrated with the trapezoid rule, not cumsum: the dynamics uses the
+% piecewise-linear interpolant of dp_x, and the trapezoid is its EXACT
+% integral (cumsum sits half a pixel off -- 59 px out of a ~27,000 px range).
+% dp_x has exactly zero mean (randpot1d_four zeroes the DC bin), so V comes
+% back to its starting value after one width: a genuine periodic potential on
+% the ring, closing to ~1e-11 px. Cosine mode gives exactly (A*cols/2pi)*cos.
+%
+% Units: pixel units, defined so that dp_x = -dV/dx with x in columns. The
+% physical potential, in the units of p' = p - dV/dX, is
+% V_phys = V * Lp*Lx/(rows*cols). The additive constant is arbitrary; each V
+% is shifted to zero mean.
+%
+% One per CYCLE: annealed draws a new potential every cycle, quenched holds
+% one fixed potential, cosine is the textbook cos. V depends on x only -- the
+% same at every row.
+%
+% Reading it: integration weights long wavelengths by 1/k^2, so ~71% of V's
+% variance sits in the single box-sized wave and V decorrelates over ~260 px,
+% against ~90 px for the kick. The big visible hump is mostly box scale. What
+% drives the dynamics is the slope (the kick, -V') and the curvature (the
+% stretching, -V'' = f'), which live in the small ripples.
+nK = numel(dp_x_hist);
+V_hist    = zeros(cols, nK);
+V_closure = zeros(1, nK);
+for q = 1:nK
+    dpq = dp_x_hist{q}(:);
+    Vq  = -cumsum([0; (dpq + circshift(dpq, -1))/2]);   % exact integral of the PL kick
+    V_closure(q) = Vq(end) - Vq(1);                    % one full width: must be ~0
+    Vq  = Vq(1:end-1);
+    V_hist(:, q) = Vq - mean(Vq);
+end
+V_phys_scale = Lp*Lx/(rows*cols);
+cycleData.V_hist       = V_hist;         % cols x cycles, pixel units, zero mean
+cycleData.V_phys_scale = V_phys_scale;   % V_phys = V_hist * V_phys_scale
+fprintf(['\nPotential: %d profiles saved (cycleData.V_hist); rms %.0f px^2, ' ...
+         'worst periodic closure %.1e px\n'], ...
+        nK, sqrt(mean(V_hist(:).^2)), max(abs(V_closure)));
+
+figure(FIG_OFFSET + 6950); clf;
+set(gcf,'Color','w','Position',[80 100 1650 450], ...
+    'Name', sprintf('Potential V(x) behind the kicks (%s)', KICK_MODE));
+tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
+xpx = (0:cols-1)';
+switch KICK_MODE
+    case 'annealed', modeNote = 'a new random potential every cycle';
+    case 'quenched', modeNote = 'one frozen potential, every cycle';
+    case 'cosine',   modeNote = 'V = (A cols/2\pi) cos(2\pi x/cols)';
+end
+
+% --- (1) every cycle's potential ---
+nexttile;
+cmapV = parula(max(nK, 2));
+for q = 1:nK
+    plot(xpx, V_hist(:, q), 'LineWidth', 1.1, 'Color', cmapV(q,:)); hold on;
+end
+if nK > 1
+    plot(xpx, mean(V_hist, 2), 'k--', 'LineWidth', 1.8);
+end
+grid on; xlim([0 cols-1]);
+xlabel('x  (pixel column = position)');
+ylabel('V(x)   (pixel units;  \times L_pL_x/(rows\cdotcols) for physical)');
+cbV = colorbar; cbV.Label.String = 'cycle';
+if nK > 1, caxis([1 nK]); end
+title({sprintf('Potential for every cycle  (%s)', KICK_MODE), ...
+       [modeNote '   |   dashed = mean over cycles']}, 'FontSize', 9);
+
+% --- (2) the whole run at a glance: cycle against position ---
+nexttile;
+imagesc(xpx, 1:nK, V_hist.');
+set(gca,'YDir','normal'); colormap(gca, parula); cb2V = colorbar;
+cb2V.Label.String = 'V(x)';
+xlabel('x  (pixel column)'); ylabel('cycle');
+title({'V(x) through the run', ...
+       'annealed: every row differs   |   quenched / cosine: every row the same'}, ...
+      'FontSize', 9);
+
+% --- (3) last cycle: the potential and the kick it produces ---
+nexttile;
+yyaxis left;
+plot(xpx, V_hist(:, nK), 'LineWidth', 1.6); ylabel('V(x)');
+yyaxis right;
+plot(xpx, dp_x_hist{nK}(:), 'LineWidth', 1.1); ylabel('kick dp_x  (rows per kick)');
+grid on; xlim([0 cols-1]);
+xlabel('x  (pixel column)');
+title({sprintf('Cycle %d: potential and kick, dp_x = -dV/dx', nK), ...
+       'kick is positive where V slopes down'}, 'FontSize', 9);
+
 %% -- save every statistics / summary figure of this mode to disk --
 % The per-cycle figures are saved as they are drawn (saved_cycle_figures/).
 % These summary figures used to exist only as open windows, so closing one
@@ -2626,6 +2719,7 @@ summaryFigs = { ...
     6800, 'blob_area_distribution_compare';    ...
     6801, 'blob_area_histogram_per_cycle';     ...
     6900, 'lagrangian_S_start_map';            ...
+    6950, 'random_potential';                  ...
     7001, 'final_S_field_blob_map'};
 sumFolder = "saved_summary_figures";
 if ~isfolder(sumFolder)
