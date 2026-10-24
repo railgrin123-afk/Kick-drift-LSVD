@@ -2606,6 +2606,44 @@ end
 hold off; drawnow;
 
 
+%% -- save every statistics / summary figure of this mode to disk --
+% The per-cycle figures are saved as they are drawn (saved_cycle_figures/).
+% These summary figures used to exist only as open windows, so closing one
+% or quitting MATLAB lost it. Each is now saved as
+%     saved_summary_figures/fig<number>_<what it shows>_<mode>.fig
+% and can be reopened any time with openfig(...). The mode is in the name, so
+% annealed, quenched and cosine never overwrite each other; re-running the
+% SAME mode replaces that mode's files with the new run.
+summaryFigs = { ...
+    6001, 'area_fraction_low_vs_high_S';      ...
+    6100, 'area_fraction_and_pixels_vs_cycle'; ...
+    6300, 'magenta_transition_area_vs_cycle';  ...
+    6400, 'total_blob_area_vs_cycle';          ...
+    6500, 'low_stretch_decay_log_fit';         ...
+    6600, 'coherence_length_xi';               ...
+    6700, 'hazard_rate_and_fluxes';            ...
+    6710, 'reentry_statistics';                ...
+    6800, 'blob_area_distribution_compare';    ...
+    6801, 'blob_area_histogram_per_cycle';     ...
+    6900, 'lagrangian_S_start_map';            ...
+    7001, 'final_S_field_blob_map'};
+sumFolder = "saved_summary_figures";
+if ~isfolder(sumFolder)
+    mkdir(sumFolder);
+end
+nSaved = 0;
+for q = 1:size(summaryFigs, 1)
+    fh = findobj(groot, 'Type', 'figure', 'Number', FIG_OFFSET + summaryFigs{q,1});
+    if isempty(fh)
+        continue;               % switched off, or no data to draw this run
+    end
+    fname = sprintf('fig%d_%s_%s.fig', summaryFigs{q,1}, summaryFigs{q,2}, KICK_MODE);
+    savefig(fh(1), fullfile(sumFolder, fname));
+    nSaved = nSaved + 1;
+end
+fprintf('Saved %d summary figures to %s/  (file names end in _%s.fig)\n', ...
+        nSaved, sumFolder, KICK_MODE);
+
 fprintf('All figures generated.  %s written.\n', blobSummaryName);
 
 % ====================== Local functions (end of file) ======================
