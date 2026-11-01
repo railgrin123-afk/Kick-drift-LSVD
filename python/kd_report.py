@@ -85,7 +85,12 @@ def caustic_fit(o, ri=1, Nmin=10):
     sel = N >= 10
     al = slope(N[sel], o['line_mean_r'][ri, sel]); be = 2 * slope(N[sel], o['line_var_r'][ri, sel])
     Nmax = int(N[ok].max()) if ok.any() else 0
-    return rate, al, be, al + be / 4, Nmax
+    p = o['exact_pieces'][ri]
+    okp = ok & (p > 0)
+    # pieces ~ total variation of x_N(x0) = integral of |a| dx0: the exact
+    # growth of the projected line length, which Kaplan's alpha+beta/4 models
+    lrate = slope(N[okp], np.log(p[okp])) if okp.sum() >= 5 else np.nan
+    return rate, al, be, al + be / 4, Nmax, lrate
 
 
 def part2(o):
@@ -126,7 +131,7 @@ def depth_ratios(o):
         num = np.nansum(np.where(T > 0, e1 * r0 / T, 0)); den = np.nansum(np.where(T > 0, e0 * r1 / T, 0))
     res['MH'] = num / den if den > 0 else np.nan
     # MH over depth only (age pooled) and over age only
-    for nm, ax in (('MH_depth', 2), ('MH_age', 1)):
+    for nm, ax in (('MH_depth', 1), ('MH_age', 0)):   # strata = depth (sum over age) | age
         a0, b0, a1, b1 = r0.sum(ax), e0.sum(ax), r1.sum(ax), e1.sum(ax)
         TT = a0 + a1
         with np.errstate(invalid='ignore', divide='ignore'):
@@ -201,13 +206,13 @@ def main():
     rows = []
     cf = {}
     for m in MODES:
-        X = np.array([[caustic_fit(o, ri) for ri in range(3)] for o in R[m]])   # seeds x rows x 5
+        X = np.array([[caustic_fit(o, ri) for ri in range(3)] for o in R[m]])   # seeds x rows x 6
         cf[m] = X
         for ri, lab in enumerate(['row0-rows/8', 'row0', 'row0+rows/8']):
-            rows.append([m, lab, pm(*ms(X[:, ri, 0])), pm(*ms(X[:, ri, 3])),
+            rows.append([m, lab, pm(*ms(X[:, ri, 0])), pm(*ms(X[:, ri, 5])), pm(*ms(X[:, ri, 3])),
                          '%.2f' % np.nanmean(X[:, ri, 0] / X[:, ri, 3]),
                          pm(*ms(X[:, ri, 1])), pm(*ms(X[:, ri, 2])), '10–%d' % np.nanmin(X[:, ri, 4])])
-    T['caustics'] = (['mode', 'launch row', 'caustic growth (fit)', 'alpha+beta/4', 'ratio',
+    T['caustics'] = (['mode', 'launch row', 'caustic growth (fit)', 'line-length growth (exact)', 'alpha+beta/4', 'ratio caustic/pred',
                       'alpha', 'beta', 'fit N'], rows)
 
     # 1A(iv) correlations
@@ -313,6 +318,7 @@ def main():
     Pi = iid['P_le']
     col2 = int(np.nonzero(K.S_LIST == 2)[0][0])
     sel = N >= 20
+    al_i_pre = slope(N[sel], iid['meanlnS'][sel])
     dec_iid = [-slope(N[sel], np.log(Pi[sel, int(np.nonzero(K.S_LIST == s)[0][0])])) for s in S_FIT]
     dec_2d = np.array([fit_4c(o)[3] for o in R['annealed']])
     lam_e = iid['lam_edges']; lam_c = 0.5 * (lam_e[:-1] + lam_e[1:])
@@ -324,17 +330,27 @@ def main():
     with np.errstate(divide='ignore', invalid='ignore'):
         h40 = iid['lam_hist'][40] / (n_iid * dl); h60 = iid['lam_hist'][60] / (n_iid * dl)
         I_diff = np.where((h40 > 0) & (h60 > 0), -(np.log(h60) - np.log(h40)) / 20, np.nan)
-    # I(0+): first lambda bins with data
-    okb = np.isfinite(I_diff)
-    I0_diff = I_diff[okb][0] if okb.any() else np.nan
+    # I(0+) from the lambda-CDF, difference N 40 -> 60. Near S = 1, P(S <= s) ~ (ln s)^2
+    # (sigma_max = 1 is a codimension-2 set), so at FIXED lambda P carries an extra
+    # (N lambda)^2 and the finite-N slope is low by 2 ln(60/40)/20; corrected below.
+    F40 = np.cumsum(iid['lam_hist'][40]) / n_iid; F60 = np.cumsum(iid['lam_hist'][60]) / n_iid
+    I0_cdf = -(np.log(F60[0]) - np.log(F40[0])) / 20
+    I0_cdf_corr = I0_cdf + 2 * np.log(60 / 40) / 20
+    lse20 = iid['Lq'][20] * 20 + np.log(n_iid)
+    Lq_diff2040 = (lse[40] - lse20) / 20
+    with np.errstate(divide='ignore', invalid='ignore'):
+        I_cdf = np.where(lam_c < al_i_pre, -(np.log(F60) - np.log(F40)) / 20,
+                         -(np.log1p(-np.minimum(F60, 1 - 1e-16) ) - np.log1p(-np.minimum(F40, 1 - 1e-16))) / 20)
+    I0_diff = dec_iid[S_FIT.index(2)]
     al_i = slope(N[sel], iid['meanlnS'][sel]); v_i = slope(N[sel], iid['varlnS'][sel])
     rows = [['i.i.d. model (1e7)', '%.4f' % al_i, '%.4f' % v_i, '%.4f' % (al_i ** 2 / (2 * v_i)),
              '%.4f' % dec_iid[S_FIT.index(2)], '%.4f–%.4f' % (min(dec_iid), max(dec_iid)),
-             '%.4f' % I0_diff, '%.4f' % (-Lq_diff.min()), '%.4f' % (-iid['Lq'][60].min())],
+             '%.4f → %.4f' % (I0_cdf, I0_cdf_corr), '%.4f / %.4f' % (-Lq_diff2040.min(), -Lq_diff.min())],
             ['2-D annealed (%d seeds)' % nseed['annealed'], pm(*ms(fit4c['annealed'][0])), pm(*ms(fit4c['annealed'][1])),
-             pm(*ms(fit4c['annealed'][2])), pm(*ms(dec_2d[:, S_FIT.index(2)])), '', '', '', '']]
-    T['iid'] = (['model', 'alpha', 'v', 'a²/2v', 'decay s=2', 'decay s=1.25..10', 'I(0+) [N 40→60]',
-                 '−min L(q) [N 40→60]', '−min L(q) [(1/N)ln, N=60]'], rows)
+             pm(*ms(fit4c['annealed'][2])), pm(*ms(dec_2d[:, S_FIT.index(2)])),
+             '%.4f–%.4f' % (np.nanmin(dec_2d.mean(0)), np.nanmax(dec_2d.mean(0))), '', '']]
+    T['iid'] = (['model', 'alpha', 'v', 'Gaussian a²/2v', 'decay of P(S≤2) = I(0)', 'decay s=1.25..10',
+                 'λ-CDF I(0+), N 40→60 → corrected for (ln S)²', '−min L(q): N 20→40 / 40→60'], rows)
     rows = []
     P2d = np.array([o['P_le'] for o in R['annealed']])
     for Nn in (5, 10, 20, 40, 60):
@@ -426,7 +442,7 @@ def main():
         for di, D_ in enumerate(o0[m]['caustic_dens']):
             ax.plot(N, o0[m]['caustics_dense'][di], ls=':', lw=1.0, color=INK2, alpha=0.4 + 0.2 * di,
                     label='grid %d/px (lower bound)' % D_ if di in (0, len(o0[m]['caustic_dens']) - 1) else None)
-        rate, al, be, pred, Nmax = (np.nanmean(cf[m][:, 1, i]) for i in range(5))
+        rate, al, be, pred, Nmax, lrate = (np.nanmean(cf[m][:, 1, i]) for i in range(6))
         Em = np.nanmean(E, 0); k0 = 10
         if np.isfinite(Em[k0]):
             xx = np.arange(10, C + 1)
@@ -625,7 +641,7 @@ def main():
     ax = axs[1]
     for Nn, cc in zip((20, 40, 60), ('#a3c4ef', '#5b98e0', '#2a78d6')):
         ax.plot(lam_c, Irate[Nn] - np.nanmin(Irate[Nn]), color=cc, lw=1, label='N=%d, −(1/N) ln p' % Nn)
-    ax.plot(lam_c, I_diff - np.nanmin(I_diff), color=INK, lw=1.2, label='difference N 40→60')
+    ax.plot(lam_e[1:], I_cdf, color=INK, lw=1.2, label='CDF difference N 40→60')
     lnp = (lam_c - al_i) ** 2 / (2 * v_i)
     ax.plot(lam_c, lnp, color='#eb6834', ls='--', lw=1, label='log-normal (λ−α)²/2v')
     ax.axhline(np.nanmean(dec_2d[:, 2]), color='#1baf7a', ls=':', lw=1, label='2-D decay s=2')
@@ -635,7 +651,7 @@ def main():
     ax.plot(qs, Lq_diff, 'o-', ms=3, color='#2a78d6', label='MC, N 40→60')
     ax.plot(qs, iid['Lq'][60], '-', color='#a3c4ef', lw=1, label='MC, (1/60) ln E')
     ax.plot(iid['TO_q'], iid['TO_L'], 's', ms=4, mfc='white', color=INK, label='transfer operator (vector)')
-    ax.axhline(-I0_diff, color='#eb6834', ls='--', lw=1, label='−I(0+)')
+    ax.axhline(-I0_diff, color='#eb6834', ls='--', lw=1, label='−I(0) = −decay of P(S≤2)')
     ax.set_xlabel('q'); ax.set_ylabel('L(q)'); ax.set_title('generalised Lyapunov exponents'); ax.legend(fontsize=6.5)
     savefig(fig, 'p4d_iid', 'i.i.d. random-matrix model: P(S≤s,N), rate function, L(q).')
     # (4E) metric

@@ -19,9 +19,8 @@ from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table, Tab
 FONT_DIR = '/usr/share/fonts/truetype/dejavu/'
 pdfmetrics.registerFont(TTFont('DV', FONT_DIR + 'DejaVuSans.ttf'))
 pdfmetrics.registerFont(TTFont('DVB', FONT_DIR + 'DejaVuSans-Bold.ttf'))
-pdfmetrics.registerFont(TTFont('DVI', FONT_DIR + 'DejaVuSans-Oblique.ttf'))
 from reportlab.lib.fonts import addMapping
-addMapping('DV', 0, 0, 'DV'); addMapping('DV', 1, 0, 'DVB'); addMapping('DV', 0, 1, 'DVI'); addMapping('DV', 1, 1, 'DVB')
+addMapping('DV', 0, 0, 'DV'); addMapping('DV', 1, 0, 'DVB'); addMapping('DV', 0, 1, 'DV'); addMapping('DV', 1, 1, 'DVB')
 
 ss = getSampleStyleSheet()
 H1 = ParagraphStyle('H1', parent=ss['Heading1'], fontName='DVB', fontSize=14, spaceAfter=6, spaceBefore=4)

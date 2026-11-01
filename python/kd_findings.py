@@ -31,6 +31,7 @@ def main():
     D = {m: [KR.depth_ratios(o) for o in R[m]] for m in KR.MODES}
     crude = {m: ms([d['crude'] for d in D[m]]) for m in KR.MODES}
     mh = {m: ms([d['MH'] for d in D[m]]) for m in KR.MODES}
+    mha = {m: ms([d['MH_age'] for d in D[m]]) for m in KR.MODES}
     shallow = {m: ms([d['user'][0][0] for d in D[m]]) for m in KR.MODES}
     F1 = {m: ms([p['F_re'][1] for p in P2[m]]) for m in KR.MODES}
     Fw = {m: ms([p['W_re'][0] for p in P2[m]]) for m in KR.MODES}
@@ -40,7 +41,7 @@ def main():
     N = np.arange(C + 1); sel = N >= 20
     dec_iid = -KR.slope(N[sel], np.log(iid['P_le'][sel, 2]))
     lse40 = iid['Lq'][40] * 40 + np.log(iid['n_samples']); lse60 = iid['Lq'][60] * 60 + np.log(iid['n_samples'])
-    Lmin = -((lse60 - lse40) / 20).min()
+    Lmin = -((lse60 - lse40) / 20).min()      # plateau value of L(q), q -> -4
     P2d = np.array([o['P_le'][:, 2] for o in R['annealed']])
     ratio_iid = {Nn: iid['P_le'][Nn, 2] / P2d[:, Nn].mean() for Nn in (10, 20, 40, 60)}
     zz = {Nn: (iid['P_le'][Nn, 2] - P2d[:, Nn].mean()) / (P2d[:, Nn].std(ddof=1) / np.sqrt(len(P2d)))
@@ -75,19 +76,27 @@ def main():
             f(pred['quenched'][0], 4), f(pred['quenched'][1], 4), f(meas2['quenched'][0], 4), f(meas2['quenched'][1], 4),
             meas2['quenched'][0] / pred['quenched'][0], f(pred['cosine'][0], 4), f(meas2['cosine'][0], 4)),
         'Why annealed misses the log-normal (4D): the annealed run is, parcel by parcel, an i.i.d. product of '
-        'step Jacobians. The i.i.d. model (10⁷ samples) gives the same growth rates and a P(S ≤ 2) decay of %s, '
-        'equal to the 2-D run, and −min L(q) = %s ≈ I(0+). The decay is set by the large-deviation rate '
-        'function at λ → 0, not by the Gaussian centre: S ≥ 1 is a hard floor, and the Gaussian approximation '
-        'α²/2v underestimates I(0). The i.i.d. P(S ≤ 2) sits within %s of the 10-seed mean (ratio %s at N = 20, '
-        '%s at N = 60).' % (f(dec_iid, 4), f(Lmin, 4), 'a few standard errors',
-                           f(ratio_iid[20], 2), f(ratio_iid[60], 2)),
-        'Caustics (1A): the exact count on the row0 line grows at %s ± %s /cycle (annealed) against Kaplan '
-        'Eq. (6) α + β/4 = %s ± %s; quenched %s vs %s; cosine %s vs %s. A fixed grid of parcels only gives a '
-        'lower bound — at %d parcels/px it saturates after N ≈ 12 — so the counts come from tracking the line '
-        'exactly as piecewise-affine pieces.' % (
-            f(cf['annealed'][:, 0].mean()), f(cf['annealed'][:, 0].std(ddof=1)), f(cf['annealed'][:, 3].mean()),
-            f(cf['annealed'][:, 3].std(ddof=1)), f(np.nanmean(cf['quenched'][:, 0])), f(np.nanmean(cf['quenched'][:, 3])),
-            f(np.nanmean(cf['cosine'][:, 0])), f(np.nanmean(cf['cosine'][:, 3])), 512),
+        'step Jacobians. The i.i.d. model (10⁷ samples) reproduces the growth rates and the decay of P(S ≤ 2) '
+        '(%s vs %s ± %s), with P(S ≤ s, N) within 2.5 standard errors of the 10-seed mean (ratio %s at '
+        'N = 20, %s at N = 60; the i.i.d. values run 2–7%% low at N ≥ 40). The generalised Lyapunov exponent has the plateau large-deviation theory predicts '
+        'for a quantity bounded below (σmax ≥ 1): L(q) is flat to 10⁻³ for q ≤ −2 at −%s, so −min L(q) ≈ '
+        'I(0) ≈ 0.10–0.11, while the Gaussian α²/2v = %s sits at the centre of the distribution and '
+        'underestimates the far lower tail. Near S = 1, P(S ≤ s) ∝ (ln s)² (σmax = 1 is a codimension-2 set): '
+        'measured P(1.25)/P(2) = %s against (ln 1.25/ln 2)² = 0.104.' % (
+            f(dec_iid, 4), f(meas2['annealed'][0], 4), f(meas2['annealed'][1], 4),
+            f(ratio_iid[20], 2), f(ratio_iid[60], 2), f(Lmin, 3), f(pred['annealed'][0], 3),
+            f(np.mean([o['P_le'][C, 0] / o['P_le'][C, 2] for o in R['annealed']]), 3)),
+        'Caustics (1A): the exact count on the row0 line grows at %s ± %s /cycle (annealed), its exact line '
+        'length at %s, against Kaplan Eq. (6) α + β/4 = %s ± %s — Eq. (6) holds. Quenched: %s vs %s, consistent '
+        'within the seed spread. Cosine fails it: caustics %s, line length %s, but α + β/4 = %s. In a mixed phase '
+        'space most of the line sits in regular islands (r ≈ 0) while the chaotic layer carries the growth, so r '
+        'is not Gaussian and its mean and variance do not predict E[e^r]. A fixed grid of parcels only gives a '
+        'lower bound on the count (at 512/px it saturates after N ≈ 12), so the counts come from tracking the '
+        'line exactly as piecewise-affine pieces.' % (
+            f(cf['annealed'][:, 0].mean()), f(cf['annealed'][:, 0].std(ddof=1)), f(np.nanmean(cf['annealed'][:, 5])),
+            f(cf['annealed'][:, 3].mean()), f(cf['annealed'][:, 3].std(ddof=1)),
+            f(np.nanmean(cf['quenched'][:, 0])), f(np.nanmean(cf['quenched'][:, 3])),
+            f(np.nanmean(cf['cosine'][:, 0])), f(np.nanmean(cf['cosine'][:, 5])), f(np.nanmean(cf['cosine'][:, 3]))),
         'Branches and low stretch (1A-iv): across x, the ray density ρ correlates with the local share of S ≤ 2 '
         '(annealed r = %s at N = 20) and more strongly with the local mean of −r (r = %s): bright branches are '
         'where the line is compressed, and S ≥ e^r makes low-S parcels a subset of compressed ones '
@@ -102,13 +111,21 @@ def main():
         '"Returned before → more likely to return" (2C): crude ratios %s (annealed), %s (quenched; earlier '
         '1.8×), %s (cosine; earlier 2.6×). At fixed depth S_{N−1} the effect largely goes away: in (2, 2.5] '
         'the ratio is %s / %s / %s, and the Mantel–Haenszel ratio adjusted for depth (7 bins) × age is '
-        '%s / %s / %s. The crude excess is mostly a depth effect — returners sit closer to the threshold.' % (
+        '%s / %s / %s, while adjusting for age alone leaves %s / %s / %s. The excess is a depth effect — '
+        'returners sit closer to the threshold — not a memory of having returned.' % (
             f(crude['annealed'][0], 2), f(crude['quenched'][0], 2), f(crude['cosine'][0], 2),
             f(shallow['annealed'][0], 2), f(shallow['quenched'][0], 2), f(shallow['cosine'][0], 2),
-            f(mh['annealed'][0], 2), f(mh['quenched'][0], 2), f(mh['cosine'][0], 2)),
-        'Metric (4E): rescaling y by f = 0.5, 2, 4 leaves α unchanged but moves P(S ≤ 2) itself; the annealed '
-        'decay rates at S_THR = 2 become %s for f = 0.5, 2, 4 (f = 1: %s).' % (
-            ' / '.join(f(x, 3) for x in np.nanmean(met['annealed'], 0)), f(meas2['annealed'][0], 3)),
+            f(mh['annealed'][0], 2), f(mh['quenched'][0], 2), f(mh['cosine'][0], 2),
+            f(mha['annealed'][0], 2), f(mha['quenched'][0], 2), f(mha['cosine'][0], 2)),
+        'Metric (4E): measuring S with y stretched by f = 0.5, 2, 4 leaves α unchanged in every mode (to < 1%%). '
+        'For annealed it moves P(S ≤ 2) by up to 20%% but the tail rates by ≤ 3%% (%s for f = 0.5, 2, 4 vs %s), '
+        'so 4C is metric-robust there. For cosine the rate itself moves (%s vs %s): its low-S set lies in '
+        'regular islands where S grows polynomially, and what counts as S ≤ 2 depends on the metric at every N. '
+        'Thresholds S_THR = 1.5 / 2 / 3 give annealed rates %s / %s / %s.' % (
+            ' / '.join(f(x, 3) for x in np.nanmean(met['annealed'], 0)), f(meas2['annealed'][0], 3),
+            ' / '.join(f(x, 3) for x in np.nanmean(met['cosine'], 0)), f(meas2['cosine'][0], 3),
+            f(np.mean([f_[3][1] for f_ in f4['annealed']]), 3), f(np.mean([f_[3][2] for f_ in f4['annealed']]), 3),
+            f(np.mean([f_[3][3] for f_ in f4['annealed']]), 3)),
     ]
     notes = {
         'caustics': 'Caustics = sign changes of a = ∂x_N/∂x_0 along the line, counted exactly (piecewise-affine '
@@ -175,7 +192,7 @@ def main():
         'prefactors behind the measured slopes are metric dependent at finite N.',
         'Caustic counts are a property of the piecewise-linear kick at 1-px resolution (corner folds); with a '
         'smooth kick the folds would be smooth and ρ would diverge as d^{−1/2}. Exact counts stop where the line '
-        'exceeds 1.2·10⁷ pieces (annealed N ≈ 33), so growth rates are fitted over N = 10 up to that point.',
+        'exceeds 1.2·10⁷ pieces (annealed N ≈ 31, quenched ≈ 33–35, cosine ≈ 41–44), so growth rates are fitted over N = 10 up to that point.',
         '"Type 1" is taken as the immediate bounce-back P(in the set at N | left at N−1), counted from '
         'consecutive masks; the check verifies the age bookkeeping reproduces it exactly.',
         'Finite N: 4C fits use N = 20..%d; the Gaussian prediction is a central-limit statement while P(S ≤ s) '
