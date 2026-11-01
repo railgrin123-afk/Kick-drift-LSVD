@@ -646,3 +646,86 @@ def integrate_line(x0, y_row, kicks, N, prm):
     for k in range(N):
         step(st, kicks[k], prm.Tau, prm.row0)
     return st
+
+
+# ============================================================ Part 1C: do low-stretch rays make the branches?
+BR_KINDS = ['lowS', 'lowR', 'nullS', 'nullR']
+BR_METRICS = ['share_branch', 'share_all', 'enrichment', 'C_all', 'C_no', 'lost', 'C_resel',
+              'corr', 'jaccard', 'n_removed']
+BR_POPS = ['line row0-rows/8', 'line row0', 'line row0+rows/8', 'tracer lattice']
+
+
+def even_pick(n, k):
+    """k of n indices spread evenly (deterministic, no random numbers): the null
+    removal. Rounds half up, as floor(x + 0.5), so MATLAB gives the same set."""
+    if k <= 0:
+        return np.zeros(0, np.int64)
+    return np.floor(np.linspace(0, n - 1, k) + 0.5).astype(np.int64)
+
+
+def branch_stats(xm, S, r, nb, binw, thr, frac=0.10):
+    """Part 1C for one population of rays at one N.
+
+    rho = rays per x bin; branches B = the top `frac` of bins of rho (all rays).
+    For each removal set -- S <= thr, r <= its 10th percentile, and the same
+    numbers of rays removed evenly along the population (nulls) -- returns
+    [share of branch ray mass in the set, its overall share, enrichment,
+     contrast of rho on B, contrast of rho_no on the SAME B, fraction of the
+     excess contrast lost (C_all - C_no)/(C_all - 1), contrast of rho_no on
+     its own top bins, Pearson corr(rho, rho_no) across x, Jaccard overlap of
+     the two branch sets, number removed].
+    """
+    n = xm.size
+    xb = np.minimum((xm / binw).astype(np.int64), nb - 1)
+    cnt = np.bincount(xb, minlength=nb).astype(float)
+    nbr = max(int(np.floor(frac * nb + 0.5)), 1)
+    B = np.argsort(-cnt, kind='stable')[:nbr]
+    C_all = cnt[B].mean() / cnt.mean()
+    q10 = np.quantile(r, 0.10)
+    lowS = S <= thr
+    lowR = r <= q10
+    masks = [lowS, lowR]
+    for m in (lowS, lowR):
+        nm = np.zeros(n, bool); nm[even_pick(n, int(m.sum()))] = True
+        masks.append(nm)
+    res = np.full((len(masks), len(BR_METRICS)), np.nan)
+    setB = set(B.tolist())
+    for k, m in enumerate(masks):
+        nrem = int(m.sum())
+        crem = np.bincount(xb[m], minlength=nb).astype(float)
+        cno = cnt - crem
+        share_b = crem[B].sum() / cnt[B].sum()
+        share_a = nrem / n
+        enr = share_b / share_a if share_a > 0 else np.nan
+        C_no = cno[B].mean() / cno.mean() if cno.sum() > 0 else np.nan
+        lost = (C_all - C_no) / (C_all - 1) if C_all > 1 else np.nan
+        B2 = np.argsort(-cno, kind='stable')[:nbr]
+        C_resel = cno[B2].mean() / cno.mean() if cno.sum() > 0 else np.nan
+        corr = pearson(cnt, cno)
+        s2 = set(B2.tolist())
+        jac = len(setB & s2) / len(setB | s2)
+        res[k] = [share_b, share_a, enr, C_all, C_no, lost, C_resel, corr, jac, nrem]
+    return res
+
+
+def run_part1c(prm, kicks=None):
+    """Part 1C alone: the launched lines and the window-seeded tracer lattice
+    (the MATLAB tracer lattice), stepped with the run's kicks. Same numbers as
+    the 'br' array of run()."""
+    C, cols, rows, Tau, row0 = prm.cycles, prm.cols, prm.rows, prm.Tau, prm.row0
+    kicks = make_kicks(prm) if kicks is None else [np.asarray(k, float).ravel() for k in kicks]
+    x_line = np.arange(cols * prm.line_dens) / prm.line_dens
+    pops = [new_state(x_line, np.full_like(x_line, yr)) for yr in prm.line_rows]
+    ys = np.arange(0, rows, prm.lag_step, dtype=float); xs = np.arange(0, cols, prm.lag_step, dtype=float)
+    XX, YY = np.meshgrid(xs, ys)                 # MATLAB's tracer order: column-major, y fastest
+    pops.append(new_state(XX.ravel(order='F'), YY.ravel(order='F')))
+    nbL = int(round(cols / prm.line_bin))
+    br = np.full((len(pops), C + 1, len(BR_KINDS), len(BR_METRICS)), np.nan)
+    for N in range(C + 1):
+        if N > 0:
+            for p in pops:
+                step(p, kicks[N - 1], Tau, row0)
+        for pi, p in enumerate(pops):
+            S = sigma_max(p['a'], p['b'], p['c'], p['d'])
+            br[pi, N] = branch_stats(np.mod(p['x'], cols), S, r_of(p), nbL, prm.line_bin, prm.S_THR)
+    return dict(mode=prm.mode, seed=prm.seed, cycles=C, br=br)

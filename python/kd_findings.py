@@ -58,6 +58,15 @@ def main():
             rr.append(row)
         met[m] = np.array(rr)
     f = lambda x, d=3: ('{:.%df}' % d).format(x)
+    # Part 1C, mean of the three lines per seed, then over seeds
+    BRM = {k: i for i, k in enumerate(K.BR_METRICS)}
+    PB = {}
+    for m in KR.MODES:
+        L = [KR.load(os.path.join(a.out, q))['br'] for q in sorted(os.listdir(a.out)) if q.startswith('p1c_%s_s' % m)]
+        PB[m] = np.array(L)
+    def b1c(m, kind, met, Nn):
+        with np.errstate(all='ignore'):
+            return np.nanmean(np.nanmean(PB[m][:, :3, Nn, kind, BRM[met]], axis=1))
 
     summary = [
         'All PASS/FAIL checks pass (table below): the age bookkeeping reproduces the existing re-entry and exit '
@@ -102,6 +111,26 @@ def main():
         'where the line is compressed, and S ≥ e^r makes low-S parcels a subset of compressed ones '
         '(P(r ≤ ln 2 | S ≤ 2) = 1 exactly; P(S ≤ 2 | r ≤ ln 2) = %s at N = 30).' % (
             f(corrL['annealed'][0], 2), f(corrR['annealed'][0], 2), f(j4f['annealed'][0], 3)),
+        'Do low-stretch rays make the branches (1C)? Mostly not. Annealed: rays with S ≤ 2 are '
+        'over-represented in branches (enrichment %s at N = 10, %s at N = 30) but carry only %s → %s → %s of '
+        'branch ray mass at N = 5 → 20 → 60; removing them costs %s → %s → %s of the excess branch contrast and the '
+        'branches stay where they are (corr(ρ, ρ_noLow) = %s → %s → %s). Quenched keeps a steady ~%s loss '
+        '(corr ≈ %s). Cosine is the exception: low-S rays (regular islands) are %s of branch mass at N = 20 and '
+        'their removal costs %s of the contrast and moves branches (corr %s). In annealed and quenched, rays of '
+        'low rarefaction (r below its 10th percentile: compressed, not unstretched) matter more than low-S ones — '
+        'removing them costs %s (annealed, N = 30) — so branches are made by compression along the line, of '
+        'which low S is a small, increasingly rare subset (S ≥ e^r). '
+        'Even-thinning nulls lose 0.000 ± 0.001, so these losses are not a ray-count effect.' % (
+            f(b1c('annealed', 0, 'enrichment', 10), 2), f(b1c('annealed', 0, 'enrichment', 30), 2),
+            '%.0f%%' % (100 * b1c('annealed', 0, 'share_branch', 5)), '%.1f%%' % (100 * b1c('annealed', 0, 'share_branch', 20)),
+            '%.2f%%' % (100 * b1c('annealed', 0, 'share_branch', 60)),
+            '%.0f%%' % (100 * b1c('annealed', 0, 'lost', 5)), '%.0f%%' % (100 * b1c('annealed', 0, 'lost', 20)),
+            '%.1f%%' % (100 * b1c('annealed', 0, 'lost', 60)),
+            f(b1c('annealed', 0, 'corr', 5), 2), f(b1c('annealed', 0, 'corr', 20), 2), f(b1c('annealed', 0, 'corr', 60), 3),
+            '%.0f%%' % (100 * np.mean([b1c('quenched', 0, 'lost', k) for k in (20, 40, 60)])),
+            f(np.mean([b1c('quenched', 0, 'corr', k) for k in (20, 40, 60)]), 2),
+            '%.0f%%' % (100 * b1c('cosine', 0, 'share_branch', 20)), '%.0f%%' % (100 * b1c('cosine', 0, 'lost', 20)),
+            f(b1c('cosine', 0, 'corr', 20), 2), '%.0f%%' % (100 * b1c('annealed', 1, 'lost', 30))),
         'Crossing ages (2B): a parcel that leaves the low set comes back within one cycle with probability '
         '%s (annealed), %s (quenched), %s (cosine); Kaplan–Meier whole-run return probability %s / %s / %s, '
         'against naive fractions %s / %s / %s that ignore censoring.' % (
@@ -132,6 +161,12 @@ def main():
                     'line, budget 1.2·10⁷ pieces). α = slope of mean r, β = 2·slope of var r over N = 10..%d; '
                     'growth fitted on ln(count) over N = 10..last exact N.' % C,
         'corr': 'Bins of 4 px with ≥ 5 parcels; mean over the three launched rows. Spearman uses average ranks.',
+        '1C': 'Per launched line and N: ρ = rays per 4-px bin (8 rays/px); branches = top 10% of bins of ρ from all '
+              'rays (48 of 480). Enrichment = share of the removed set in branch ray mass / its share of all rays. '
+              'Contrast = mean ρ on the branch bins / mean ρ; "lost" = (C_all − C_no)/(C_all − 1) on the same bins '
+              '(shown only where C_all ≥ 1.25: on a nearly flat line it divides by ~0). Null = the same number of rays '
+              'removed evenly along the line. Cosine is a single deterministic run; its period-2 sawtooth in N is the '
+              'map\'s own near-resonant rotation, not noise.',
         'pooled': 'Tracers = the MATLAB lattice (seeded every 2 px in the window). Re-entry: at risk = out of the '
                   'set at N−1, age = N − exit cycle. Exit: at risk = in the set at N−1, age = N − entry cycle, '
                   'entrants only (the original cohort is separate in 2B).',

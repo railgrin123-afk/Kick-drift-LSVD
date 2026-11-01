@@ -1,3 +1,4 @@
 out/run_*.pkl.gz
 out/iid.pkl.gz
 __pycache__/
+out/p1c_*.pkl.gz

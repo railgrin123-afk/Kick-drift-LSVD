@@ -465,6 +465,72 @@ def main():
         ax.axhline(0, color=INK2, lw=0.6); ax.set_xlabel('N')
     axs[0].set_ylabel('Pearson r (mean of 3 rows)'); axs[0].legend()
     savefig(fig, 'p1a_corr', 'Correlation across x of ρ with low-stretch fraction and with −r.')
+
+    # ---------------------------------------------------------------- 1C: do low-stretch rays make the branches?
+    BRM = {k: i for i, k in enumerate(K.BR_METRICS)}
+    PB = {}
+    for m in MODES:
+        fs = sorted(glob.glob(os.path.join(a.out, 'p1c_%s_s*.pkl.gz' % m)))
+        L = [load(p)['br'] for p in fs]
+        if m == 'cosine' and len(L) == 1:
+            L = L * nseed['cosine']          # deterministic: every seed is the same run
+        PB[m] = np.array(L) if L else None      # seeds x pop x N x kind x metric
+    if all(PB[m] is not None for m in MODES):
+        def lines(m, kind, met):                 # mean over the three launched lines, per seed
+            X = PB[m][:, :3, :, kind, BRM[met]].copy()
+            if met == 'lost':                    # (C_all - C_no)/(C_all - 1) is ill-conditioned on a flat line
+                X[PB[m][:, :3, :, kind, BRM['C_all']] < 1.25] = np.nan
+            with np.errstate(all='ignore'):
+                return np.nanmean(X, axis=1)
+        rows = []
+        for m in MODES:
+            for Nn in (5, 10, 20, 30, 40, 60):
+                g = lambda kind, met, fm='{:.3f}': pm(*ms(lines(m, kind, met)[:, Nn]), fm)
+                rows.append([m, Nn, g(0, 'share_all', '{:.4f}'), g(0, 'share_branch', '{:.4f}'), g(0, 'enrichment', '{:.2f}'),
+                             g(0, 'C_all', '{:.2f}'), g(0, 'C_no', '{:.2f}'), g(0, 'lost', '{:+.3f}'), g(0, 'corr'),
+                             g(0, 'jaccard', '{:.2f}'), g(1, 'enrichment', '{:.2f}'), g(1, 'lost', '{:+.3f}'), g(1, 'corr'),
+                             g(2, 'lost', '{:+.3f}') + ' / ' + g(3, 'lost', '{:+.3f}')])
+        T['1C'] = (['mode', 'N', 'low-S share (all rays)', 'low-S share of branch mass', 'enrichment',
+                    'contrast, all rays', 'contrast, no low-S', 'contrast lost', 'corr(ρ, ρ_noLow)', 'branch overlap (Jaccard)',
+                    'low-r enrichment', 'low-r contrast lost', 'corr(ρ, ρ_noLowR)', 'null lost (S / r)'], rows)
+        rows = []
+        for m in MODES:
+            for Nn in (5, 10, 20, 40, 60):
+                g = lambda kind, met, fm='{:.3f}': pm(*ms(PB[m][:, 3, Nn, kind, BRM[met]]), fm)
+                rows.append([m, Nn, g(0, 'C_all', '{:.3f}'), g(2, 'C_all', '{:.3f}'), g(0, 'enrichment', '{:.2f}'),
+                             g(1, 'enrichment', '{:.2f}'), g(0, 'corr', '{:.4f}')])
+        T['1C_lat'] = (['mode', 'N', 'contrast of the lattice projection', '(same)', 'low-S enrichment',
+                        'low-r enrichment', 'corr(ρ, ρ_noLow)'], rows)
+        T['1C_lat'] = ([h for i, h in enumerate(T['1C_lat'][0]) if i != 3],
+                       [[c for i, c in enumerate(r) if i != 3] for r in T['1C_lat'][1]])
+        # figure: (1)-(3) vs N, three modes, low-S (top) and low-r (bottom); grey = even-thinning null
+        fig, axs = plt.subplots(2, 4, figsize=(15, 6.4))
+        for row, (kind, nkind, lab) in enumerate(((0, 2, 'S ≤ 2'), (1, 3, 'r ≤ 10th percentile'))):
+            for m in MODES:
+                band(axs[row, 0], N, lines(m, kind, 'enrichment'), COL[m], m)
+                band(axs[row, 1], N, lines(m, kind, 'C_all'), COL[m], m if row == 0 else None)
+                band(axs[row, 1], N, lines(m, kind, 'C_no'), COL[m], None, ls='--')
+                band(axs[row, 2], N, lines(m, kind, 'lost'), COL[m], m)
+                band(axs[row, 3], N, lines(m, kind, 'corr'), COL[m], m)
+                if m == 'annealed':
+                    axs[row, 2].plot(N, ms(lines(m, nkind, 'lost'))[0], color=INK2, lw=0.9, label='null (even thinning)')
+                    axs[row, 3].plot(N, ms(lines(m, nkind, 'corr'))[0], color=INK2, lw=0.9, label='null (even thinning)')
+            axs[row, 0].axhline(1, color=INK2, lw=0.7)
+            axs[row, 0].set_ylabel('removed set = %s' % lab)
+            axs[row, 0].set_title('(1) enrichment in branches' if row == 0 else '')
+            axs[row, 1].set_title('(2) branch contrast: all (—) / without (– –)' if row == 0 else '')
+            axs[row, 2].set_title('(2) fraction of excess contrast lost' if row == 0 else '')
+            axs[row, 3].set_title('(3) corr across x of ρ and ρ without' if row == 0 else '')
+            axs[row, 2].axhline(0, color=INK2, lw=0.7)
+            for ax in axs[row]:
+                ax.set_xlabel('N')
+        axs[0, 0].set_yscale('log'); axs[1, 0].set_yscale('log')
+        axs[0, 0].legend(); axs[0, 2].legend(fontsize=6.5); axs[0, 3].legend(fontsize=6.5)
+        fig.suptitle('Part 1C — do low-stretch rays make the branches? Launched lines (mean of 3 rows), '
+                     'mean ± 1 sd over seeds; branches = top 10% of 4-px bins of ρ')
+        fig.tight_layout()
+        savefig(fig, 'p1c_branches', 'Part 1C: enrichment of the removed rays in branches, branch contrast with and '
+                'without them, the fraction of contrast lost, and the correlation of ρ with ρ_noLow, vs N.')
     # (1B) band projections
     for m in MODES:
         fig = plt.figure(figsize=(11, 5.2))
@@ -693,6 +759,8 @@ def main():
     md.extend(['## Checks', ''] + ['- **%s** — %s: %s' % ('PASS' if ok else 'FAIL', n, d) for n, ok, d in checks] + [''])
     TITLES = [('4C', '4C. Kaplan log-normal tail test (fit N = 20..%d)' % C), ('4C_seed0', '4C reproduction, seed 0'),
               ('caustics', '1A. Caustic growth vs Kaplan Eq. (6)'), ('corr', '1A(iv). Correlations across x'),
+              ('1C', '1C. Do low-stretch rays make the branches? (launched lines, mean of 3 rows)'),
+              ('1C_lat', '1C control: the tracer lattice (area-filling, so no branches)'),
               ('pooled', '2A. Pooled age-bin hazards'), ('KM', '2B. Kaplan–Meier F(k)'),
               ('depth', '2C. Returned-before effect at fixed depth'), ('Ple', '4A. P(S ≤ s)'),
               ('mom', '4A. Moments and quantiles of ln S'), ('iid', '4D. i.i.d. random-matrix model'),

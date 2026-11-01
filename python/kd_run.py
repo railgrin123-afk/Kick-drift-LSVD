@@ -40,6 +40,14 @@ def one(args):
     return path, time.time() - t
 
 
+def p1c_job(args):
+    mode, seed, cycles, out = args
+    path = os.path.join(out, f'p1c_{mode}_s{seed}.pkl.gz')
+    if not os.path.exists(path):
+        _save(K.run_part1c(K.Params(cycles=cycles, mode=mode, seed=seed)), path)
+    return path, 0.0
+
+
 def iid_job(out, n_samples=10 ** 7, cycles=60):
     path = os.path.join(out, 'iid.pkl.gz')
     if os.path.exists(path):
@@ -65,6 +73,7 @@ def main():
     ap.add_argument('--workers', type=int, default=3)
     ap.add_argument('--out', default=os.path.join(os.path.dirname(__file__), 'out'))
     ap.add_argument('--no-iid', action='store_true')
+    ap.add_argument('--only-part1c', action='store_true', help='just the Part 1C branch statistics')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     jobs = []
@@ -72,6 +81,11 @@ def main():
         for s in (a.seeds if m != 'cosine' else [0]):
             jobs.append((m, s, a.cycles, a.out))
     jobs.sort(key=lambda j: j[1] != 0)           # the heavier seed-0 runs first
+    with Pool(a.workers, maxtasksperchild=1) as P:   # Part 1C (seconds per run)
+        for p, _ in P.imap_unordered(p1c_job, jobs, chunksize=1):
+            print(p, flush=True)
+    if a.only_part1c:
+        return
     if not a.no_iid:
         p, dt = iid_job(a.out, cycles=a.cycles)
         print(f'iid model -> {p} ({dt:.0f}s)', flush=True)

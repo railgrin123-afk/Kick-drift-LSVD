@@ -85,6 +85,8 @@ def main():
     S.append(Paragraph('Part 1 — launched lines of rays', H1))
     tsec('caustics', '1A. Caustic growth vs Kaplan Eq. (6) prediction α + β/4', F['notes'].get('caustics'))
     tsec('corr', '1A(iv). Correlation across x of the ray density ρ', F['notes'].get('corr'))
+    tsec('1C', '1C. Do low-stretch rays make the branches? (launched lines, mean of 3 rows)', F['notes'].get('1C'))
+    tsec('1C_lat', '1C control: the tracer lattice (area-filling, so its projection has no branches)')
     S.append(PageBreak())
     S.append(Paragraph('Part 2 — crossing ages', H1))
     tsec('pooled', '2A. Pooled age-bin hazards', F['notes'].get('pooled'))
