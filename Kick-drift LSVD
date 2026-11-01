@@ -401,6 +401,40 @@ if ~strcmp(KICK_MODE, 'annealed')
     XI.MAX_LAG = 480;
 end
 
+% ============ MANIFOLDS, CROSSING AGES, DISTRIBUTION OF S (Parts 1, 2, 4) ============
+% The multi-seed versions of these analyses are in python/ (kd_engine.py);
+% this is the same arithmetic for a single group run. Everything here only
+% READS the run. It draws no random numbers from the run's stream (the i.i.d.
+% model in 4D saves the generator state and restores it), changes no
+% existing variable or figure, and writes only new cycleData fields named
+% an_*. Every existing number and figure is therefore bit-identical with
+% AN.ENABLE on or off. New figures are 10100-10450 inside this mode's
+% FIG_OFFSET block and are saved with the other summary figures.
+%
+% Conventions: S = sigma_max(M) in closed form, S_THR = SParams.S_THR,
+% M = [a b; c d] with rows (x, y), J = [1+Tau*fp, Tau; fp, 1].
+AN.ENABLE      = true;
+LINE.ROWS      = [row0 - rows/8, row0, row0 + rows/8];  % launched lines of rays (y0)
+LINE.DENS      = 8;       % parcels per px along each line, spanning all x
+LINE.BIN       = 4;       % px per bin of the projected density rho(x,N)
+LINE.SNAP_N    = [5 10 20 40 60];   % phase-plane snapshots of the row0 line
+LINE.CHK_DENS  = 512;     % dense row0 line for the 1/|a| vs histogram check
+LINE.EXACT_MAX = 4e6;     % piece budget of the exact caustic count (memory ~ 1 GB)
+BANDP.BIN      = 4;       % px per bin of the band projections (1B)
+AGE.MIN_RISK   = 200;     % hazards with fewer parcels at risk are hidden
+SDIST.EDGES    = 0:0.05:13;                        % log10 S bins, plus an overflow count
+SDIST.S_LIST   = [1.25 1.5 2 3 5 10 20 50 100 1e3 1e4 1e6];
+SDIST.QUANTS   = [0.01 0.10 0.25 0.50 0.75 0.90 0.99];
+SDIST.BANDS    = [2 5 10 100 1e4];                 % <=2, 2-5, 5-10, 10-100, 100-1e4, >1e4
+SDIST.METRIC_F = [0.5 2 4];                        % y -> f*y, i.e. S of D*M/D, D = diag(1,f)
+SDIST.FIT_NMIN = 20;                               % 4C fit window N = 20..cycles
+IID.ENABLE     = true;    % i.i.d. random-matrix model (4D), run after the loop
+IID.SEED       = 12345;   % its own stream; the run's generator state is restored
+IID.NKICKS     = 500;     % fresh kicks pooled for the distribution of fp
+IID.NSAMP      = 1e7;     % parcels (in chunks of IID.CHUNK)
+IID.CHUNK      = 1e6;
+IID.NMAX       = 60;
+
 % ---- DOT colours, one per S band (see dot_band_index for the bands) ----
 % Hoisted out of the per-cycle loop: these are constants, and the zoom probe
 % figures need them too.
@@ -647,6 +681,87 @@ if LAG.ENABLE
             6*numel(tr_x)*8/1e6, lag_ny*lag_nx*cycles*4/1e6);
 end
 
+% -------------------- an_*: storage for Parts 1, 2, 4 --------------------
+% Index N+1 holds cycle N, N = 0..cycles.
+if AN.ENABLE
+    an_C     = cycles;
+    an_thr   = SParams.S_THR;
+    an_nrow  = numel(LINE.ROWS);
+    an_nbL   = round(cols / LINE.BIN);
+    an_nbB   = round(cols / BANDP.BIN);
+    an_snapN = LINE.SNAP_N(LINE.SNAP_N <= cycles);
+    an_jointN = [10 30 60];  an_jointN = an_jointN(an_jointN <= cycles);
+    an_RB = -6:0.25:30;  an_SB = 0:0.25:30;        % 4F bins in r and ln S
+    % 1A: launched lines, each carrying its own M from M = I
+    an_L = cell(an_nrow, 1);
+    for r_ = 1:an_nrow
+        an_L{r_} = an_line_new((0:cols*LINE.DENS-1).' / LINE.DENS, LINE.ROWS(r_));
+    end
+    an_Lchk = an_line_new((0:cols*LINE.CHK_DENS-1).' / LINE.CHK_DENS, row0);
+    an_rho_hist  = zeros(an_nrow, an_C+1, an_nbL);  % from the histogram of parcels
+    an_rho_a     = nan(an_nrow, an_C+1, an_nbL);    % exact, sum of 1/|a| over branches
+    an_caus_bin  = false(an_nrow, an_C+1, an_nbL);
+    an_caus_grid = zeros(an_nrow, an_C+1);          % sign changes of a between neighbours
+    an_mean_r    = zeros(an_nrow, an_C+1);  an_var_r = zeros(an_nrow, an_C+1);
+    an_mean_lnS  = zeros(an_nrow, an_C+1);
+    an_corr_low  = nan(an_nrow, an_C+1, 2);         % [Pearson Spearman] of rho vs frac S<=thr
+    an_corr_negr = nan(an_nrow, an_C+1, 2);         % ... vs local mean of -r
+    an_chk_rho_hist = zeros(an_C+1, an_nbL);  an_chk_count = zeros(an_C+1, an_nbL);
+    an_chk_rho_a    = nan(an_C+1, an_nbL);    an_chk_caus  = false(an_C+1, an_nbL);
+    an_snap  = struct('N', {}, 'x', {}, 'y', {}, 'S', {}, 'a', {});
+    an_joint = struct('N', {}, 'H', {}, 'P_lowS', {}, 'P_lowS_given_lowr', {}, ...
+                      'P_lowr_given_lowS', {}, 'r_q10', {}, 'P_lowS_given_r10', {}, ...
+                      'P_r10_given_lowS', {}, 'violations', {});
+    % 1B: band projections of the tracer lattice
+    an_band_x = zeros(an_C+1, 3, an_nbB);
+    % 2: crossing ages, per tracer
+    an_risk_re = zeros(an_C+1, an_C+1);  an_ev_re = zeros(an_C+1, an_C+1);  % [exit cycle, age]
+    an_risk_ex = zeros(an_C+1, an_C+1);  an_ev_ex = zeros(an_C+1, an_C+1);  % [entry cycle, age]
+    an_DEPTH   = [2 2.5 3 5 10 20 100 Inf];         % bins of S_{N-1}; the first three + '>5' are reported
+    an_DEPTH_LABELS = {'(2,2.5]','(2.5,3]','(3,5]','(5,10]','(10,20]','(20,100]','>100'};
+    an_risk_rda = zeros(2, 7, an_C+1);  an_ev_rda = zeros(2, 7, an_C+1);    % [returned before?, depth, age]
+    an_n_ent = zeros(an_C+1, 1);  an_n_ext = zeros(an_C+1, 1);
+    an_type1 = [0 0];               % [back at N, left at N-1], from consecutive masks
+    if LAG.ENABLE
+        an_nT      = numel(tr_x);
+        an_lowPrev = true(an_nT, 1);              % S_0 = 1: every parcel starts in the set
+        an_SprevT  = ones(an_nT, 1);
+        an_exitCyc = zeros(an_nT, 1, 'uint16');   % cycle of the last exit
+        an_entCyc  = zeros(an_nT, 1, 'uint16');   % cycle of the last entry (0 = original cohort)
+        an_nRet    = zeros(an_nT, 1, 'uint16');   % re-entries so far
+        an_extPrev = false(an_nT, 1);
+        an_band_x(1,:,:) = an_band_hist(tr_x, ones(an_nT,1), cols, BANDP.BIN);
+    end
+    % 4: distribution of S on the measured FIELD_STEP lattice
+    an_nS     = numel(SDIST.EDGES) - 1;
+    an_nF     = numel(SDIST.METRIC_F);
+    an_hist   = zeros(an_C+1, an_nS);   an_over = zeros(an_C+1, 1);
+    an_nvalid = zeros(an_C+1, 1);       an_Nw4  = nan(an_C+1, 1);
+    an_Ple    = nan(an_C+1, numel(SDIST.S_LIST));
+    an_mom    = nan(an_C+1, 4);         an_quant = nan(an_C+1, numel(SDIST.QUANTS));
+    an_bshare = nan(an_C+1, numel(SDIST.BANDS)+1);
+    an_mPle   = nan(an_nF, an_C+1, numel(SDIST.S_LIST));
+    an_mHist  = zeros(an_nF, an_C+1, an_nS);
+    an_mMean  = nan(an_nF, an_C+1);
+    % N = 0: M = I everywhere, S = 1 on every lattice point
+    an_nvalid(1) = numel(1:SParams.FIELD_STEP:rows) * numel(1:SParams.FIELD_STEP:cols);
+    an_hist(1,1) = an_nvalid(1);  an_Nw4(1) = 0;
+    an_Ple(1,:)  = 1;  an_mom(1,:) = [0 0 NaN NaN];  an_quant(1,:) = 0;
+    an_bshare(1,:) = [1 zeros(1, numel(SDIST.BANDS))];
+    an_mPle(:,1,:) = 1;  an_mHist(:,1,1) = an_nvalid(1);  an_mMean(:,1) = 0;
+    % N = 0 rows of the line statistics
+    for r_ = 1:an_nrow
+        R_ = an_line_record(an_L{r_}, cols, LINE.DENS, LINE.BIN, an_thr);
+        an_rho_hist(r_,1,:) = R_.rho_hist;  an_rho_a(r_,1,:) = R_.rho_a;
+        an_caus_bin(r_,1,:) = R_.caus_bin;  an_caus_grid(r_,1) = R_.ncaus;
+        an_mean_r(r_,1) = R_.mean_r;  an_var_r(r_,1) = R_.var_r;  an_mean_lnS(r_,1) = R_.mean_lnS;
+    end
+    clear R_
+    fprintf(['Parts 1/2/4: %d lines x %d parcels, check line %d parcels, ' ...
+             'distribution of S on the %d-px lattice.\n'], an_nrow, cols*LINE.DENS, ...
+            cols*LINE.CHK_DENS, SParams.FIELD_STEP);
+end
+
 % -------------------- KICK MODE: what each cycle applies --------------------
 % Placed after runMetadata.rngStateBeforeKicks is captured, so that field is
 % still the state before ANY kick in every mode.
@@ -821,6 +936,76 @@ for it = 1:cycles
         clear lowNow_ S_lag_ newAge_
     end
 
+    % ---- Parts 1A, 1B, 2: lines and tracer crossing ages, this cycle ----
+    % Reads dp_x and the tracer state only; the S here repeats the tracer
+    % block's arithmetic exactly, so it is the same S, bit for bit.
+    if AN.ENABLE
+        for r_ = 1:an_nrow
+            an_L{r_} = an_line_step(an_L{r_}, dp_x, Tau, row0);
+            R_ = an_line_record(an_L{r_}, cols, LINE.DENS, LINE.BIN, an_thr);
+            an_rho_hist(r_,it+1,:) = R_.rho_hist;  an_rho_a(r_,it+1,:) = R_.rho_a;
+            an_caus_bin(r_,it+1,:) = R_.caus_bin;  an_caus_grid(r_,it+1) = R_.ncaus;
+            an_mean_r(r_,it+1) = R_.mean_r;  an_var_r(r_,it+1) = R_.var_r;
+            an_mean_lnS(r_,it+1) = R_.mean_lnS;
+            an_corr_low(r_,it+1,:) = R_.corr_low;  an_corr_negr(r_,it+1,:) = R_.corr_negr;
+            if r_ == 2 && any(an_snapN == it)          % phase-plane snapshot of the row0 line
+                an_snap(end+1) = struct('N', it, 'x', single(R_.xm), 'y', single(an_L{r_}.y), ...
+                                        'S', single(R_.S), 'a', single(an_L{r_}.a)); %#ok<SAGROW>
+            end
+        end
+        % 4F: joint distribution of r and ln S on the three lines
+        if any(an_jointN == it)
+            rr_ = []; ll_ = [];
+            for r_ = 1:an_nrow
+                rr_ = [rr_; 0.5*log(an_L{r_}.a.^2 + an_L{r_}.c.^2)]; %#ok<AGROW>
+                ll_ = [ll_; log(an_sigma(an_L{r_}.a, an_L{r_}.b, an_L{r_}.c, an_L{r_}.d))]; %#ok<AGROW>
+            end
+            an_joint(end+1) = an_joint_record(it, rr_, ll_, an_RB, an_SB, an_thr); %#ok<SAGROW>
+            clear rr_ ll_
+        end
+        % dense row0 line: exact 1/|a| against the histogram, same bins
+        an_Lchk = an_line_step(an_Lchk, dp_x, Tau, row0);
+        xb_ = min(floor(mod(an_Lchk.x, cols) / LINE.BIN), an_nbL-1) + 1;
+        cnt_ = accumarray(xb_, 1, [an_nbL 1]);
+        an_chk_count(it+1,:)    = cnt_.';
+        an_chk_rho_hist(it+1,:) = cnt_.' / (LINE.CHK_DENS * LINE.BIN);
+        [rho_, cb_] = an_rho_from_a(an_Lchk.x, an_Lchk.a, LINE.BIN, cols);
+        an_chk_rho_a(it+1,:) = rho_.';  an_chk_caus(it+1,:) = cb_.';
+        clear R_ xb_ cnt_ rho_ cb_
+
+        if LAG.ENABLE
+            tt_  = tr_a.^2 + tr_b.^2 + tr_c.^2 + tr_d.^2;
+            S_   = (sqrt(tt_+2) + sqrt(max(tt_-2,0))) / 2;
+            low_ = S_ <= an_thr;
+            ent_ = low_ & ~an_lowPrev;   ext_ = an_lowPrev & ~low_;
+            an_n_ent(it+1) = nnz(ent_);  an_n_ext(it+1) = nnz(ext_);
+            an_type1 = an_type1 + [nnz(an_extPrev & low_), nnz(an_extPrev)];
+            % re-entry: at risk = out of the set at N-1; age = N - exit cycle
+            o_ = ~an_lowPrev;
+            if any(o_)
+                e_  = double(an_exitCyc(o_));  k_ = it - e_;  ev_ = double(low_(o_));
+                an_risk_re = an_risk_re + accumarray([e_+1, k_+1], 1,   [an_C+1 an_C+1]);
+                an_ev_re   = an_ev_re   + accumarray([e_+1, k_+1], ev_, [an_C+1 an_C+1]);
+                db_  = min(max(sum(an_SprevT(o_) > an_DEPTH(1:end-1), 2), 1), 7);
+                rep_ = double(an_nRet(o_) >= 1) + 1;          % 2 = has returned before
+                an_risk_rda = an_risk_rda + accumarray([rep_, db_, k_+1], 1,   [2 7 an_C+1]);
+                an_ev_rda   = an_ev_rda   + accumarray([rep_, db_, k_+1], ev_, [2 7 an_C+1]);
+            end
+            % exit: at risk = in the set at N-1; age = N - entry cycle
+            % (entry cycle 0 is the original cohort, kept separate downstream)
+            if any(an_lowPrev)
+                g_  = double(an_entCyc(an_lowPrev));  k_ = it - g_;
+                ev_ = double(~low_(an_lowPrev));
+                an_risk_ex = an_risk_ex + accumarray([g_+1, k_+1], 1,   [an_C+1 an_C+1]);
+                an_ev_ex   = an_ev_ex   + accumarray([g_+1, k_+1], ev_, [an_C+1 an_C+1]);
+            end
+            an_exitCyc(ext_) = it;  an_entCyc(ent_) = it;  an_nRet(ent_) = an_nRet(ent_) + 1;
+            an_extPrev = ext_;  an_lowPrev = low_;  an_SprevT = S_;
+            an_band_x(it+1,:,:) = an_band_hist(tr_x, S_, cols, BANDP.BIN);
+            clear tt_ S_ low_ ent_ ext_ o_ e_ k_ ev_ db_ rep_ g_
+        end
+    end
+
     % ---- warp for visualization (pullback) ----
     stage1_img = warp_image(cur, @InverseKick_vert, struct('dp_x', dp_x));
 
@@ -869,11 +1054,31 @@ for it = 1:cycles
 
     % ---- (B) S magnitude vs start (HEATMAP + COLORBAR + optional S=2 contour) ----
     if SHOW_S_FIELD_FIG
-        [Sfine_final, maskFine_final, Scoarse, maskC, ScoarsePrev] = ...
-            Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
-                            t0_recent, Nw, SParams);
+        if AN.ENABLE
+            % same field, plus S of D*M/D for the metric rescalings of Part 4E
+            [Sfine_final, maskFine_final, Scoarse, maskC, ScoarsePrev, an_Smetric_] = ...
+                Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+                                t0_recent, Nw, SParams, SDIST.METRIC_F);
+        else
+            [Sfine_final, maskFine_final, Scoarse, maskC, ScoarsePrev] = ...
+                Sfield_snapshot(dp_x_hist, row0, Tau, rows, cols, ...
+                                t0_recent, Nw, SParams);
+        end
         cycleData.S(:,:,it)    = Sfine_final;
         cycleData.mask(:,:,it) = maskFine_final;
+        % ---- Part 4: distribution of S on the measured lattice (never the image) ----
+        if AN.ENABLE
+            an_SmV_ = reshape(an_Smetric_, [], an_nF);
+            R_ = an_sdist_row(Scoarse(maskC), an_SmV_(maskC(:), :), SDIST);
+            an_Nw4(it+1)  = Nw;              % S here spans kicks t0+1 .. t0+Nw
+            an_nvalid(it+1) = R_.n;  an_hist(it+1,:) = R_.hist;  an_over(it+1) = R_.over;
+            an_Ple(it+1,:) = R_.Ple;  an_mom(it+1,:) = R_.mom;  an_quant(it+1,:) = R_.quant;
+            an_bshare(it+1,:) = R_.bshare;
+            an_mPle(:,it+1,:) = reshape(R_.mPle, an_nF, 1, []);
+            an_mHist(:,it+1,:) = reshape(R_.mHist, an_nF, 1, []);
+            an_mMean(:,it+1) = R_.mMean(:);
+            clear R_ an_SmV_ an_Smetric_
+        end
         % -------------------- CURRENT-LOCATION ONLY ANALYSIS --------------------
 
         % Two families of mask, and they are not interchangeable:
@@ -2699,6 +2904,569 @@ xlabel('x  (pixel column)');
 title({sprintf('Cycle %d: potential and kick, dp_x = -dV/dx', nK), ...
        'kick is positive where V slopes down'}, 'FontSize', 9);
 
+%% ==================== Parts 1, 2, 4: results, checks, figures ====================
+if AN.ENABLE
+    an_Nv = (0:an_C).';
+    fprintf('\n==================== Parts 1, 2, 4 (%s) ====================\n', KICK_MODE);
+
+    % ------------------------------------------------ 1A caustics, exact
+    % The kick is the piecewise-linear interpolant of dp_x, so one step is
+    % affine inside every unit cell of x and the line maps piecewise-affinely:
+    % a = dx_N/dx0 is constant on each piece. Tracking the pieces (cut where
+    % they cross an integer x) counts every sign change of a exactly; a grid
+    % of parcels only gives a lower bound that saturates once the line is
+    % longer than the grid can resolve (line length grows as e^{(alpha+beta/4)N}).
+    an_caus_exact = nan(an_nrow, an_C+1);  an_pieces = zeros(an_nrow, an_C+1);
+    for r_ = 1:an_nrow
+        [ce_, np_] = an_caustics_exact(dp_x_hist, Tau, row0, cols, LINE.ROWS(r_), an_C, LINE.EXACT_MAX);
+        an_caus_exact(r_,:) = ce_.';  an_pieces(r_,:) = np_.';
+    end
+    an_caus_fit = nan(an_nrow, 5);    % [fitted growth, alpha, beta, alpha+beta/4, last N fitted]
+    fprintf('1A  caustics (exact count on the piecewise-affine line) vs Kaplan Eq. (6):\n');
+    for r_ = 1:an_nrow
+        sel_ = an_Nv >= 10;
+        al_ = an_slope(an_Nv(sel_), an_mean_r(r_, sel_).');
+        be_ = 2 * an_slope(an_Nv(sel_), an_var_r(r_, sel_).');
+        ce_ = an_caus_exact(r_,:).';
+        ok_ = an_Nv >= 10 & isfinite(ce_) & ce_ > 0;
+        rt_ = an_slope(an_Nv(ok_), log(ce_(ok_)));
+        lastN_ = max([0; an_Nv(ok_)]);
+        an_caus_fit(r_,:) = [rt_, al_, be_, al_ + be_/4, lastN_];
+        fprintf('    y0 = %6.1f: growth %.4f /cycle (N = 10..%d)  vs  alpha + beta/4 = %.4f  (alpha %.4f, beta %.4f)\n', ...
+                LINE.ROWS(r_), rt_, lastN_, al_ + be_/4, al_, be_);
+    end
+    if an_C < 12
+        fprintf('    (fits need N >= 10; run at least 12 cycles)\n');
+    end
+
+    % ------------------------------------------------ 1A(iv) correlations
+    fprintf('1A(iv) corr across x of rho with frac S<=%g and with mean(-r), mean of %d rows (Pearson):\n', an_thr, an_nrow);
+    for Nn_ = intersect([5 10 20 40 60 an_C], 1:an_C)
+        fprintf('    N = %2d:  %+.3f   %+.3f\n', Nn_, an_nanmean(an_corr_low(:,Nn_+1,1)), ...
+                an_nanmean(an_corr_negr(:,Nn_+1,1)));
+    end
+
+    % ------------------------------------------------ Part 2
+    an_r_re = sum(an_risk_re, 1).';  an_e_re = sum(an_ev_re, 1).';       % by age (row k+1)
+    an_r_ex = sum(an_risk_ex(2:end,:), 1).';  an_e_ex = sum(an_ev_ex(2:end,:), 1).';
+    an_r_co = an_risk_ex(1,:).';  an_e_co = an_ev_ex(1,:).';             % original cohort
+    an_h_re = an_hazard(an_e_re, an_r_re, AGE.MIN_RISK);
+    an_h_ex = an_hazard(an_e_ex, an_r_ex, AGE.MIN_RISK);
+    an_h_co = an_hazard(an_e_co, an_r_co, AGE.MIN_RISK);
+    an_F_re = an_km(an_h_re);  an_F_ex = an_km(an_h_ex);  an_F_co = an_km(an_h_co);
+    an_AGEB = [1 1; 2 2; 3 5; 6 10; 11 20; 21 40; 41 Inf];
+    an_AGEB_LABELS = {'1','2','3-5','6-10','11-20','21-40','>40'};
+    an_pool = nan(size(an_AGEB,1), 4);    % [h_re, at risk, h_exit, at risk]
+    for b_ = 1:size(an_AGEB,1)
+        k_ = (an_AGEB(b_,1):min(an_AGEB(b_,2), an_C)) + 1;
+        an_pool(b_,:) = [sum(an_e_re(k_))/sum(an_r_re(k_)), sum(an_r_re(k_)), ...
+                         sum(an_e_ex(k_))/sum(an_r_ex(k_)), sum(an_r_ex(k_))];
+    end
+    fprintf('2A  pooled hazards by age (re-entry | exit of entrants):\n');
+    for b_ = 1:size(an_AGEB,1)
+        fprintf('    age %-6s  h_re %.4f (%9d at risk)   h_exit %.4f (%9d at risk)\n', ...
+                an_AGEB_LABELS{b_}, an_pool(b_,1), an_pool(b_,2), an_pool(b_,3), an_pool(b_,4));
+    end
+    an_KS = [1 2 3 5 10 20 40];
+    an_naive = [sum(an_e_re)/an_r_re(2), sum(an_e_ex)/an_r_ex(2), sum(an_e_co)/an_r_co(2)];
+    fprintf('2B  Kaplan-Meier F(k) = 1 - prod(1-h), with the naive fraction (censoring ignored):\n');
+    fprintf('    %-20s', 'direction');  fprintf(' F(%2d) ', an_KS);  fprintf('  whole run      naive\n');
+    an_Fw = nan(3, 2);
+    nm_ = {'re-entry', 'exit (entrants)', 'exit (orig. cohort)'};
+    FF_ = {an_F_re, an_F_ex, an_F_co};  RR_ = {an_r_re, an_r_ex, an_r_co};
+    for d_ = 1:3
+        F_ = FF_{d_};  fprintf('    %-20s', nm_{d_});
+        for k_ = an_KS
+            if k_+1 <= numel(F_), fprintf(' %.3f ', F_(k_+1)); else, fprintf('   -   '); end
+        end
+        kk_ = find(RR_{d_} >= AGE.MIN_RISK & isfinite(F_), 1, 'last');
+        if ~isempty(kk_), an_Fw(d_,:) = [F_(kk_), kk_-1]; end
+        fprintf('  %.3f (k=%2d)  %.3f\n', an_Fw(d_,1), an_Fw(d_,2), an_naive(d_));
+    end
+    % 2C: does "returned before" raise the re-entry hazard at FIXED depth S_{N-1}?
+    an_DUSER = {1, 2, 3, 4:7};  an_DUSER_LABELS = {'(2,2.5]','(2.5,3]','(3,5]','>5'};
+    an_dep = nan(numel(an_DUSER), 5);    % [ratio, events rep, at risk rep, events first, at risk first]
+    for g_ = 1:numel(an_DUSER)
+        d_ = an_DUSER{g_};
+        x_ = an_risk_rda(2,d_,:); r1_ = sum(x_(:));  x_ = an_ev_rda(2,d_,:); e1_ = sum(x_(:));
+        x_ = an_risk_rda(1,d_,:); r0_ = sum(x_(:));  x_ = an_ev_rda(1,d_,:); e0_ = sum(x_(:));
+        an_dep(g_,:) = [(e1_/r1_)/(e0_/r0_), e1_, r1_, e0_, r0_];
+    end
+    e1_ = an_ev_rda(2,:,:); r1_ = an_risk_rda(2,:,:); e0_ = an_ev_rda(1,:,:); r0_ = an_risk_rda(1,:,:);
+    an_crude = (sum(e1_(:))/sum(r1_(:))) / (sum(e0_(:))/sum(r0_(:)));
+    an_MH = an_mantel_haenszel(squeeze(an_ev_rda(2,:,:)), squeeze(an_risk_rda(2,:,:)), ...
+                               squeeze(an_ev_rda(1,:,:)), squeeze(an_risk_rda(1,:,:)));
+    fprintf('2C  re-entry hazard ratio, returned before / first time:\n');
+    fprintf('    all depths (crude)            %.2f\n', an_crude);
+    for g_ = 1:numel(an_DUSER)
+        fprintf('    S_{N-1} in %-9s           %.2f   (%d/%d vs %d/%d events/at risk)\n', ...
+                an_DUSER_LABELS{g_}, an_dep(g_,1), an_dep(g_,2), an_dep(g_,3), an_dep(g_,4), an_dep(g_,5));
+    end
+    fprintf('    Mantel-Haenszel, 7 depth bins x age   %.2f\n', an_MH);
+
+    % ------------------------------------------------ PASS/FAIL checks
+    fprintf('Checks:\n');
+    if LAG.ENABLE
+        nre_ = 0;  nex_ = round(an_nT * (1 - haz_f(1)));       % N = 1 exits: everyone was low at N = 0
+        for i_ = 2:an_C
+            if isfinite(haz_reent(i_)), nre_ = nre_ + round(haz_reent(i_) * haz_f(i_) * an_nT); end
+            if isfinite(haz_gross(i_)), nex_ = nex_ + round(haz_gross(i_) * haz_nprev(i_)); end
+        end
+        an_check('sum of age re-entry events = re-entries from haz_reent', sum(an_ev_re(:)) == nre_, ...
+                 sprintf('%d vs %d', sum(an_ev_re(:)), nre_));
+        an_check('sum of age exit events = exits from haz_gross (+ N=1)', sum(an_ev_ex(:)) == nex_, ...
+                 sprintf('%d vs %d', sum(an_ev_ex(:)), nex_));
+        t1_ = an_type1(1) / an_type1(2);  a1_ = an_e_re(2) / an_r_re(2);
+        an_check('pooled age-1 re-entry hazard = Type 1 (consecutive masks)', abs(t1_ - a1_) < 1e-12, ...
+                 sprintf('%.6f vs %.6f', a1_, t1_));
+    end
+    cbd_ = an_chk_caus | circshift(an_chk_caus, 1, 2) | circshift(an_chk_caus, -1, 2) | ...
+           circshift(an_chk_caus, 2, 2) | circshift(an_chk_caus, -2, 2);
+    ok_ = isfinite(an_chk_rho_a) & ~cbd_ & an_chk_count >= 200;  ok_(1,:) = false;
+    rel_ = abs(an_chk_rho_a(ok_) ./ an_chk_rho_hist(ok_) - 1);
+    an_check('rho from 1/|a| vs histogram within 2% away from caustics', ...
+             ~isempty(rel_) && mean(rel_ < 0.02) >= 0.95, ...
+             sprintf('%d bins, median |rel| %.4f, %.1f%% within 2%%', numel(rel_), median(rel_), 100*mean(rel_ < 0.02)));
+    v_ = sum([an_joint.violations]);
+    an_check('S >= e^r on every line parcel (4F)', v_ == 0, sprintf('%d violations', v_));
+
+    % ------------------------------------------------ 4C log-normal tail test
+    an_v4 = an_Nw4 == an_Nv;                % cycles where S spans kicks 1..N
+    an_fitN = SDIST.FIT_NMIN;
+    if nnz(an_v4 & an_Nv >= an_fitN) < 5
+        an_fitN = max(1, floor(max(an_Nv(an_v4)) / 2));
+        fprintf('4C  (fewer than 5 cycles at N >= %d: fitting N >= %d instead)\n', SDIST.FIT_NMIN, an_fitN);
+    end
+    sel_ = an_v4 & an_Nv >= an_fitN;
+    an_alpha = an_slope(an_Nv(sel_), an_mom(sel_,1));
+    an_v     = an_slope(an_Nv(sel_), an_mom(sel_,2));
+    an_pred  = an_alpha^2 / (2*an_v);
+    an_SFIT  = [1.25 1.5 2 3 5 10];
+    an_meas  = nan(size(an_SFIT));
+    for s_ = 1:numel(an_SFIT)
+        c_ = find(SDIST.S_LIST == an_SFIT(s_));
+        P_ = an_Ple(:, c_);  okp_ = sel_ & P_ .* an_nvalid >= 10;
+        if nnz(okp_) >= 5, an_meas(s_) = -an_slope(an_Nv(okp_), log(P_(okp_))); end
+    end
+    fprintf('4C  Kaplan PRL 89 184103: alpha %.4f, v %.4f (N = %d..%d) -> predicted rate alpha^2/2v = %.4f\n', ...
+            an_alpha, an_v, an_fitN, max(an_Nv(sel_)), an_pred);
+    for s_ = 1:numel(an_SFIT)
+        fprintf('    s = %5.2f: measured -dlnP(S<=s)/dN = %.4f   ratio %.2f\n', an_SFIT(s_), an_meas(s_), an_meas(s_)/an_pred);
+    end
+    % 4E: thresholds 1.5/2/3 are the s columns above; metric rescaling here
+    an_metric = nan(an_nF, 4);       % [alpha, rate at s = 1.5, 2, 3]
+    for i_ = 1:an_nF
+        an_metric(i_,1) = an_slope(an_Nv(sel_), an_mMean(i_, sel_).');
+        for s_ = 1:3
+            thr3_ = [1.5 2 3];  c_ = find(SDIST.S_LIST == thr3_(s_));
+            P_ = squeeze(an_mPle(i_, :, c_)).';  okp_ = sel_ & P_ .* an_nvalid >= 10;
+            if nnz(okp_) >= 5, an_metric(i_, s_+1) = -an_slope(an_Nv(okp_), log(P_(okp_))); end
+        end
+        fprintf('4E  y scaled by %.1f: alpha %.4f, rates at S_THR = 1.5/2/3: %.4f %.4f %.4f\n', ...
+                SDIST.METRIC_F(i_), an_metric(i_,:));
+    end
+
+    % ------------------------------------------------ 4D i.i.d. random-matrix model
+    an_iid = struct();
+    if IID.ENABLE
+        rngSaved_ = rng;                     % the run's stream is restored below
+        rng(IID.SEED, 'twister');
+        pool_ = zeros(cols, IID.NKICKS);
+        for k_ = 1:IID.NKICKS
+            dk_ = K * randpot1d_four(cf_x);
+            pool_(:, k_) = circshift(dk_, -1) - dk_;     % the PL kick's exact slope
+        end
+        an_iid = an_iid_model(pool_(:), Tau, IID, SDIST);
+        rng(rngSaved_);
+        an_iid.TO_q = 0:0.25:4;
+        an_iid.TO_L = an_transfer_L(pool_(:), Tau, an_iid.TO_q, 2048, 301);
+        clear pool_ dk_ rngSaved_
+        selI_ = (0:IID.NMAX).' >= 20;
+        aI_ = an_slope(find(selI_)-1, an_iid.meanlnS(selI_));  vI_ = an_slope(find(selI_)-1, an_iid.varlnS(selI_));
+        dI_ = -an_slope(find(selI_)-1, log(an_iid.P_le(selI_, SDIST.S_LIST == 2)));
+        an_iid.summary = [aI_, vI_, aI_^2/(2*vI_), dI_];
+        fprintf('4D  i.i.d. model (%g samples): alpha %.4f, v %.4f, alpha^2/2v %.4f, decay of P(S<=2) %.4f\n', ...
+                IID.NSAMP, an_iid.summary);
+        if isfield(an_iid, 'Lq') && size(an_iid.Lq, 1) >= 2
+            [~, i40_] = min(abs(an_iid.Nkeep - 40));  [~, i60_] = min(abs(an_iid.Nkeep - 60));
+            lse_ = an_iid.Lq .* an_iid.Nkeep(:) + log(an_iid.n);
+            an_iid.Lq_diff = (lse_(i60_,:) - lse_(i40_,:)) / (an_iid.Nkeep(i60_) - an_iid.Nkeep(i40_));
+            fprintf('    -min L(q) (N 40->60) = %.4f  vs  I(0+) ~ decay rate %.4f\n', -min(an_iid.Lq_diff), dI_);
+        end
+        for N_ = intersect([10 20 40 60], 1:min(an_C, IID.NMAX))
+            fprintf('    N = %2d: P(S<=2) i.i.d. %.3e   this run %.3e\n', N_, ...
+                    an_iid.P_le(N_+1, SDIST.S_LIST == 2), an_Ple(N_+1, SDIST.S_LIST == 2));
+        end
+    end
+
+    % ------------------------------------------------ save
+    cycleData.an_settings = struct('LINE', LINE, 'BANDP', BANDP, 'AGE', AGE, 'SDIST', SDIST, 'IID', IID);
+    cycleData.an_lines = struct('rho_hist', an_rho_hist, 'rho_a', an_rho_a, 'caus_bin', an_caus_bin, ...
+        'caus_grid', an_caus_grid, 'caus_exact', an_caus_exact, 'pieces', an_pieces, ...
+        'caus_fit', an_caus_fit, 'mean_r', an_mean_r, 'var_r', an_var_r, 'mean_lnS', an_mean_lnS, ...
+        'corr_low', an_corr_low, 'corr_negr', an_corr_negr, 'chk_rho_hist', an_chk_rho_hist, ...
+        'chk_rho_a', an_chk_rho_a, 'chk_caus', an_chk_caus, 'chk_count', an_chk_count);
+    cycleData.an_snap  = an_snap;
+    cycleData.an_joint = an_joint;
+    cycleData.an_band_x = an_band_x;
+    cycleData.an_part2 = struct('risk_re', an_risk_re, 'ev_re', an_ev_re, 'risk_ex', an_risk_ex, ...
+        'ev_ex', an_ev_ex, 'risk_rda', an_risk_rda, 'ev_rda', an_ev_rda, 'n_ent', an_n_ent, ...
+        'n_ext', an_n_ext, 'type1', an_type1, 'h_re', an_h_re, 'h_ex', an_h_ex, 'h_co', an_h_co, ...
+        'r_re', an_r_re, 'r_ex', an_r_ex, 'r_co', an_r_co, 'F_re', an_F_re, 'F_ex', an_F_ex, ...
+        'F_co', an_F_co, 'pool', an_pool, 'naive', an_naive, 'F_whole', an_Fw, 'depth', an_dep, ...
+        'crude', an_crude, 'MH', an_MH);
+    cycleData.an_sdist = struct('hist', an_hist, 'overflow', an_over, 'n', an_nvalid, 'N', an_Nw4, ...
+        'P_le', an_Ple, 'mom', an_mom, 'quant', an_quant, 'bandshare', an_bshare, ...
+        'metric_P_le', an_mPle, 'metric_hist', an_mHist, 'metric_mean_lnS', an_mMean, ...
+        'alpha', an_alpha, 'v', an_v, 'pred', an_pred, 'meas', an_meas, 'fitN', an_fitN, 'metric', an_metric);
+    cycleData.an_iid = an_iid;
+    fprintf('Parts 1/2/4 saved to %s as an_settings, an_lines, an_snap, an_joint, an_band_x, an_part2, an_sdist, an_iid.\n', matFileName);
+
+    % ------------------------------------------------ figures 10100-10450
+    an_modes = {'annealed', 'quenched', 'cosine'};
+    an_mcol  = [0.165 0.471 0.839; 0.922 0.408 0.204; 0.106 0.686 0.478];
+    an_me    = find(strcmp(an_modes, KICK_MODE));
+    an_xc    = (0:an_nbL-1)*LINE.BIN + LINE.BIN/2;
+    an_rowlab = {'row0 - rows/8', 'row0', 'row0 + rows/8'};
+
+    % (1A-i) branched flow: rho(x,N), log colour, one panel per launched row
+    figure(FIG_OFFSET + 10100); clf;
+    set(gcf, 'Color', 'w', 'Name', 'Branched flow rho(x,N)');
+    tiledlayout(1, an_nrow, 'TileSpacing', 'compact');
+    for r_ = 1:an_nrow
+        nexttile;
+        img_ = squeeze(an_rho_hist(r_,:,:));  img_(img_ <= 0) = NaN;
+        imagesc(an_xc, an_Nv, log10(img_));  set(gca, 'YDir', 'normal');  caxis([-1.5 1.7]);
+        xlabel('x (px)');  ylabel('cycle N');
+        title(sprintf('launch row %s (y_0 = %.0f)', an_rowlab{min(r_,3)}, LINE.ROWS(r_)));
+        colorbar;
+    end
+    sgtitle(sprintf('%s: projected ray density log_{10} \\rho(x,N), %d parcels/px, %d px bins', ...
+                    KICK_MODE, LINE.DENS, LINE.BIN));
+
+    % (1A-ii) manifold in the phase plane, coloured by S, rho underneath
+    if ~isempty(an_snap)
+        figure(FIG_OFFSET + 10110); clf;
+        set(gcf, 'Color', 'w', 'Name', 'Manifold snapshots');
+        ns_ = numel(an_snap);
+        tiledlayout(2, ns_, 'TileSpacing', 'compact');
+        for j_ = 1:ns_
+            nexttile(j_);
+            scatter(an_snap(j_).x, an_snap(j_).y, 1, log10(double(an_snap(j_).S)), 'filled');
+            caxis([0 8]);  title(sprintf('N = %d', an_snap(j_).N));  xlabel('x (px)');
+            if j_ == 1, ylabel('y (px, unwrapped)'); end
+            if j_ == ns_, cb_ = colorbar; cb_.Label.String = 'log_{10} S'; end
+            nexttile(ns_ + j_);
+            semilogy(an_xc, squeeze(an_rho_hist(2, an_snap(j_).N+1, :)), 'k-');  hold on;
+            aa_ = double(an_snap(j_).a);  cs_ = find(aa_ .* circshift(aa_, -1) < 0);
+            plot(an_snap(j_).x(cs_), 0.03*ones(size(cs_)), 'r|');  hold off;
+            ylim([0.02 200]);  xlabel('x (px)');
+            if j_ == 1, ylabel('\rho(x) | caustics'); end
+        end
+        sgtitle(sprintf('%s: row0 line in the phase plane; red ticks = caustics (sign changes of a)', KICK_MODE));
+    end
+
+    % (1A-iii) caustic count vs N against alpha + beta/4
+    figure(FIG_OFFSET + 10120); clf;
+    set(gcf, 'Color', 'w', 'Name', 'Caustics vs N');
+    tiledlayout(1, an_nrow, 'TileSpacing', 'compact');
+    for r_ = 1:an_nrow
+        nexttile;
+        semilogy(an_Nv, an_caus_exact(r_,:), 'o-', 'Color', an_mcol(an_me,:), 'MarkerSize', 3);  hold on;
+        semilogy(an_Nv, max(an_caus_grid(r_,:), 0.5), ':', 'Color', [0.4 0.4 0.4]);
+        f_ = an_caus_fit(r_,:);
+        if isfinite(f_(1)) && an_C >= 10
+            n0_ = an_caus_exact(r_, 11);  xx_ = 10:an_C;
+            semilogy(xx_, n0_*exp(f_(4)*(xx_-10)), 'k--');
+            semilogy(xx_, n0_*exp(f_(1)*(xx_-10)), '-.', 'Color', an_mcol(an_me,:));
+        end
+        hold off;  xlabel('N');  ylabel('caustics on the line');
+        legend({'exact (piecewise-affine)', sprintf('grid, %d/px (lower bound)', LINE.DENS), ...
+                sprintf('\\alpha+\\beta/4 = %.3f', f_(4)), sprintf('fit = %.3f', f_(1))}, 'Location', 'northwest');
+        title(sprintf('launch row %s', an_rowlab{min(r_,3)}));
+    end
+    sgtitle(sprintf('%s: caustic count vs Kaplan Eq. (6), \\alpha = slope <r>, \\beta = 2 slope var(r), N \\geq 10', KICK_MODE));
+
+    % (1A-iv) correlations across x
+    figure(FIG_OFFSET + 10130); clf;
+    set(gcf, 'Color', 'w', 'Name', 'rho correlations');
+    tiledlayout(1, 2, 'TileSpacing', 'compact');
+    nexttile;  plot(an_Nv, squeeze(an_corr_low(:,:,1)).', '-');  yline(0, 'k:');
+    xlabel('N');  ylabel('Pearson r');  title(sprintf('\\rho vs local fraction S \\leq %g', an_thr));
+    legend(an_rowlab(1:min(an_nrow,3)), 'Location', 'best');
+    nexttile;  plot(an_Nv, squeeze(an_corr_negr(:,:,1)).', '-');  yline(0, 'k:');
+    xlabel('N');  ylabel('Pearson r');  title('\rho vs local mean of -r');
+    sgtitle(sprintf('%s: correlation across x of the ray density', KICK_MODE));
+
+    % (1B) band projections of the tracer lattice
+    if LAG.ENABLE
+        figure(FIG_OFFSET + 10200); clf;
+        set(gcf, 'Color', 'w', 'Name', 'Band projections');
+        tiledlayout(2, 3, 'TileSpacing', 'compact');
+        bl_ = {'S \leq 2', '2 < S \leq 5', 'S > 5'};
+        xB_ = (0:an_nbB-1)*BANDP.BIN + BANDP.BIN/2;
+        for b_ = 1:3
+            nexttile(b_);
+            img_ = squeeze(an_band_x(:, b_, :));  img_(img_ <= 0) = NaN;
+            imagesc(xB_, an_Nv, log10(img_));  set(gca, 'YDir', 'normal');  colorbar;
+            xlabel('x (px)');  ylabel('cycle N');  title(['log_{10} tracers per bin, ' bl_{b_}]);
+        end
+        mN_ = intersect([10 30 60], 1:an_C);
+        bc_ = [0.165 0.471 0.839; 0.929 0.631 0; 0.890 0.286 0.282];
+        for j_ = 1:numel(mN_)
+            nexttile(3 + j_);
+            for b_ = 1:3
+                semilogy(xB_, squeeze(an_band_x(mN_(j_)+1, b_, :)) + 0.5, '-', 'Color', bc_(b_,:));  hold on;
+            end
+            hold off;  xlabel('x (px)');  title(sprintf('marginal at N = %d', mN_(j_)));
+            if j_ == 1, ylabel('tracers per bin (+0.5)'); legend(bl_, 'Location', 'best'); end
+        end
+        sgtitle(sprintf('%s: band projections onto x (bins of %d px)', KICK_MODE, BANDP.BIN));
+    end
+
+    % (2A) hazard vs age, at-risk counts on a second axis
+    if LAG.ENABLE
+        figure(FIG_OFFSET + 10300); clf;
+        set(gcf, 'Color', 'w', 'Name', 'Hazard vs age');
+        tiledlayout(1, 3, 'TileSpacing', 'compact');
+        HH_ = {an_h_re, an_h_ex, an_h_co};  RR_ = {an_r_re, an_r_ex, an_r_co};
+        tl_ = {'re-entry h_{re}(k)', 'exit h_{exit}(k), entrants', 'exit, original cohort'};
+        for d_ = 1:3
+            nexttile;  k_ = (1:an_C).';
+            yyaxis left;   semilogy(k_, HH_{d_}(2:end), 'o-', 'Color', an_mcol(an_me,:), 'MarkerSize', 3);
+            ylabel('hazard');
+            yyaxis right;  bar(k_, RR_{d_}(2:end), 0.8, 'FaceColor', [0.6 0.6 0.6], 'FaceAlpha', 0.25, 'EdgeColor', 'none');
+            set(gca, 'YScale', 'log');  ylabel('at risk');
+            xlabel('age k (cycles since the last crossing)');  title(tl_{d_});
+        end
+        sgtitle(sprintf('%s: age-structured hazards (points with < %d at risk hidden)', KICK_MODE, AGE.MIN_RISK));
+
+        % (2B) Kaplan-Meier
+        figure(FIG_OFFSET + 10310); clf;
+        set(gcf, 'Color', 'w', 'Name', 'Kaplan-Meier');
+        ls_ = {'-', '--', ':'};  FF_ = {an_F_re, an_F_ex, an_F_co};
+        for d_ = 1:3
+            plot(0:an_C, FF_{d_}, ls_{d_}, 'Color', an_mcol(an_me,:), 'LineWidth', 1.5);  hold on;
+        end
+        for d_ = 1:3
+            F_ = FF_{d_};
+            plot([1 2], F_([2 3]), 'o', 'Color', an_mcol(an_me,:), 'MarkerFaceColor', an_mcol(an_me,:));
+            if isfinite(an_Fw(d_,1)), plot(an_Fw(d_,2), an_Fw(d_,1), 's', 'Color', an_mcol(an_me,:), 'MarkerSize', 8); end
+        end
+        hold off;  set(gca, 'XScale', 'log');  xlabel('age k');  ylabel('F(k) = 1 - \Pi(1 - h)');
+        legend({'re-entry', 'exit (entrants)', 'exit (original cohort)'}, 'Location', 'southeast');
+        title(sprintf('%s: Kaplan-Meier (dots: k = 1, 2; squares: whole run)', KICK_MODE));
+
+        % (2A) pooled bins, three modes side by side (other modes from their saved runs)
+        an_P2 = cell(1, 3);
+        an_P2{an_me} = struct('pool', an_pool, 'h_re', an_h_re, 'h_ex', an_h_ex);
+        for m_ = 1:3
+            if m_ == an_me, continue; end
+            fn_ = ['full_cycle_data_' an_modes{m_} '.mat'];
+            if exist(fn_, 'file') == 2
+                try
+                    t_ = load(fn_, 'an_part2');
+                    if isfield(t_, 'an_part2'), an_P2{m_} = t_.an_part2; end
+                catch
+                end
+            end
+        end
+        figure(FIG_OFFSET + 10320); clf;
+        set(gcf, 'Color', 'w', 'Name', 'Pooled age bins');
+        tiledlayout(1, 2, 'TileSpacing', 'compact');
+        for d_ = 1:2
+            nexttile;  Y_ = nan(size(an_AGEB,1), 3);
+            for m_ = 1:3
+                if ~isempty(an_P2{m_}), Y_(:, m_) = an_P2{m_}.pool(:, 2*d_-1); end
+            end
+            bh_ = bar(Y_, 'grouped');
+            for m_ = 1:3, bh_(m_).FaceColor = an_mcol(m_,:); end
+            set(gca, 'YScale', 'log', 'XTick', 1:size(an_AGEB,1), 'XTickLabel', an_AGEB_LABELS);
+            xlabel('age bin (cycles)');  ylabel('pooled hazard');
+            title(ternary_str(d_ == 1, 're-entry', 'exit (entrants)'));
+            legend(an_modes, 'Location', 'best');
+        end
+        sgtitle('Pooled age-bin hazards, three modes (missing bars: that mode has not been run here yet)');
+
+        % (2A) cohort heat map
+        figure(FIG_OFFSET + 10330); clf;
+        set(gcf, 'Color', 'w', 'Name', 'Cohort heat map');
+        H_ = an_ev_re ./ an_risk_re;  H_(an_risk_re < AGE.MIN_RISK) = NaN;
+        imagesc(0:an_C, 0:an_C, log10(H_));  set(gca, 'YDir', 'normal');  colorbar;
+        xlabel('age k');  ylabel('exit cycle (cohort)');
+        title(sprintf('%s: log_{10} re-entry hazard by exit cycle and age', KICK_MODE));
+
+        % (2C) depth-controlled ratios
+        figure(FIG_OFFSET + 10340); clf;
+        set(gcf, 'Color', 'w', 'Name', 'Depth-controlled re-entry ratio');
+        rf_ = nan(1, 7);
+        for d_ = 1:7
+            x_ = an_ev_rda(2,d_,:); e1_ = sum(x_(:));  x_ = an_risk_rda(2,d_,:); r1_ = sum(x_(:));
+            x_ = an_ev_rda(1,d_,:); e0_ = sum(x_(:));  x_ = an_risk_rda(1,d_,:); r0_ = sum(x_(:));
+            rf_(d_) = (e1_/r1_) / (e0_/r0_);
+        end
+        semilogy(1:7, rf_, 'o-', 'Color', an_mcol(an_me,:), 'MarkerFaceColor', an_mcol(an_me,:));  hold on;
+        yline(an_crude, ':', sprintf('crude %.2f', an_crude));
+        yline(an_MH, '--', sprintf('Mantel-Haenszel depth x age %.2f', an_MH));
+        yline(1, 'k-');  hold off;
+        set(gca, 'XTick', 1:7, 'XTickLabel', an_DEPTH_LABELS);
+        xlabel('depth S_{N-1}');  ylabel('h(returned before) / h(first time)');
+        title(sprintf('%s: is a returner more likely to return at the same depth?', KICK_MODE));
+
+        % three modes overlaid
+        figure(FIG_OFFSET + 10350); clf;
+        set(gcf, 'Color', 'w', 'Name', 'Hazards, modes overlaid');
+        tiledlayout(1, 2, 'TileSpacing', 'compact');
+        fl_ = {'h_re', 'h_ex'};  tt_ = {'re-entry hazard', 'exit hazard (entrants)'};
+        for d_ = 1:2
+            nexttile;  lg_ = {};
+            for m_ = 1:3
+                if ~isempty(an_P2{m_})
+                    h_ = an_P2{m_}.(fl_{d_});
+                    semilogy(1:numel(h_)-1, h_(2:end), '-', 'Color', an_mcol(m_,:), 'LineWidth', 1.5);  hold on;
+                    lg_{end+1} = an_modes{m_}; %#ok<AGROW>
+                end
+            end
+            hold off;  xlabel('age k');  ylabel('hazard');  title(tt_{d_});  legend(lg_, 'Location', 'best');
+        end
+        sgtitle('Age-structured hazards, the modes run so far');
+    end
+
+    % (4A) distribution of S
+    e_ = SDIST.EDGES;  c10_ = (e_(1:end-1) + e_(2:end))/2;  dl_ = e_(2) - e_(1);
+    dens_ = an_hist ./ max(an_nvalid, 1) / dl_;        % per decade
+    figure(FIG_OFFSET + 10400); clf;
+    set(gcf, 'Color', 'w', 'Name', 'Distribution of S: ridge');
+    rN_ = intersect([1 3 5 10 20 30 40 60], 1:an_C);
+    for j_ = 1:numel(rN_)
+        d_ = dens_(rN_(j_)+1, :);  d_ = d_ / max(max(d_), 1e-12);
+        fill([c10_ fliplr(c10_)], [1.2*(j_-1) + d_, 1.2*(j_-1)*ones(size(d_))], an_mcol(an_me,:), ...
+             'FaceAlpha', 0.3, 'EdgeColor', an_mcol(an_me,:));  hold on;
+        text(-0.2, 1.2*(j_-1) + 0.2, sprintf('N=%d', rN_(j_)), 'HorizontalAlignment', 'right');
+    end
+    hold off;  xlim([-1.2 10]);  set(gca, 'YTick', []);  xlabel('log_{10} S');
+    title(sprintf('%s: distribution of log_{10} S on the measured lattice (each ridge normalised)', KICK_MODE));
+
+    figure(FIG_OFFSET + 10401); clf;
+    set(gcf, 'Color', 'w', 'Name', 'Distribution of S: heat map');
+    img_ = dens_;  img_(img_ <= 0) = NaN;
+    imagesc(c10_, an_Nv, log10(img_));  set(gca, 'YDir', 'normal');  cb_ = colorbar;
+    cb_.Label.String = 'log_{10} density per decade';
+    xlabel('log_{10} S');  ylabel('N');  title(sprintf('%s: [N x bins] distribution of log_{10} S', KICK_MODE));
+
+    figure(FIG_OFFSET + 10402); clf;
+    set(gcf, 'Color', 'w', 'Name', 'Distribution of S: quantile fan');
+    Q_ = an_quant / log(10);  okq_ = all(isfinite(Q_), 2);  nq_ = an_Nv(okq_).';  Q_ = Q_(okq_,:);
+    fill([nq_ fliplr(nq_)], [Q_(:,1).' fliplr(Q_(:,7).')], an_mcol(an_me,:), 'FaceAlpha', 0.12, 'EdgeColor', 'none');  hold on;
+    fill([nq_ fliplr(nq_)], [Q_(:,2).' fliplr(Q_(:,6).')], an_mcol(an_me,:), 'FaceAlpha', 0.20, 'EdgeColor', 'none');
+    fill([nq_ fliplr(nq_)], [Q_(:,3).' fliplr(Q_(:,5).')], an_mcol(an_me,:), 'FaceAlpha', 0.35, 'EdgeColor', 'none');
+    plot(nq_, Q_(:,4), '-', 'Color', an_mcol(an_me,:), 'LineWidth', 1.5);
+    yline(log10(an_thr), 'k--');  hold off;
+    xlabel('N');  ylabel('log_{10} S');  legend({'1-99%', '10-90%', '25-75%', 'median', 'S_{THR}'}, 'Location', 'northwest');
+    title(sprintf('%s: quantile fan of S', KICK_MODE));
+
+    figure(FIG_OFFSET + 10403); clf;
+    set(gcf, 'Color', 'w', 'Name', 'Distribution of S: band shares');
+    okb_ = all(isfinite(an_bshare), 2);
+    area(an_Nv(okb_), an_bshare(okb_,:));  ylim([0 1]);  xlabel('N');  ylabel('share of the lattice');
+    legend({'S \leq 2', '2-5', '5-10', '10-100', '100-10^4', '> 10^4'}, 'Location', 'eastoutside');
+    title(sprintf('%s: stacked shares of S bands', KICK_MODE));
+
+    % (4B) collapse of (ln S - mean)/sd
+    figure(FIG_OFFSET + 10410); clf;
+    set(gcf, 'Color', 'w', 'Name', 'Collapse of ln S');
+    zz_ = linspace(-5, 5, 400);  lg_ = {};
+    for Nn_ = intersect([10 20 30 40 60], 1:an_C)
+        mu_ = an_mom(Nn_+1, 1);  sd_ = sqrt(an_mom(Nn_+1, 2));
+        z_ = (c10_*log(10) - mu_) / sd_;
+        d_ = an_hist(Nn_+1,:) / an_nvalid(Nn_+1) / (dl_*log(10)) * sd_;  d_(d_ <= 0) = NaN;
+        semilogy(z_, d_, '-');  hold on;  lg_{end+1} = sprintf('N = %d', Nn_); %#ok<AGROW>
+    end
+    semilogy(zz_, exp(-zz_.^2/2)/sqrt(2*pi), 'k--');  lg_{end+1} = 'N(0,1)';  hold off;
+    ylim([1e-6 1]);  xlim([-5 6]);  xlabel('(ln S - mean)/sd');  ylabel('density');  legend(lg_);
+    title(sprintf('%s: collapse test (the low tail is cut at S = 1)', KICK_MODE));
+
+    % (4C) log-normal tail test
+    figure(FIG_OFFSET + 10420); clf;
+    set(gcf, 'Color', 'w', 'Name', '4C tail test');
+    lg_ = {};
+    for s_ = [1.25 2 5 10]
+        P_ = an_Ple(:, SDIST.S_LIST == s_);  P_(P_ <= 0) = NaN;
+        plot(an_Nv, -log(P_), '-');  hold on;  lg_{end+1} = sprintf('s = %g', s_); %#ok<AGROW>
+    end
+    P2_ = an_Ple(:, SDIST.S_LIST == 2);
+    if isfinite(an_pred) && an_fitN+1 <= numel(P2_)
+        xx_ = an_fitN:an_C;
+        plot(xx_, -log(P2_(an_fitN+1)) + an_pred*(xx_ - an_fitN), 'k--');
+        lg_{end+1} = sprintf('slope \\alpha^2/2v = %.3f', an_pred);
+    end
+    hold off;  xlabel('N');  ylabel('-ln P(S \leq s)');  legend(lg_, 'Location', 'northwest');
+    title(sprintf('%s: measured %.3f vs log-normal %.3f at s = 2 (fit N \\geq %d)', KICK_MODE, ...
+                  an_meas(an_SFIT == 2), an_pred, an_fitN));
+
+    % (4D) i.i.d. model
+    if IID.ENABLE && isfield(an_iid, 'P_le')
+        figure(FIG_OFFSET + 10430); clf;
+        set(gcf, 'Color', 'w', 'Name', '4D i.i.d. model');
+        tiledlayout(1, 3, 'TileSpacing', 'compact');
+        nexttile;  lg_ = {};  cc_ = lines(4);  j_ = 0;
+        for s_ = [1.5 2 5 10]
+            j_ = j_ + 1;  c_ = SDIST.S_LIST == s_;
+            semilogy(an_Nv, an_Ple(:, c_), '-', 'Color', cc_(j_,:));  hold on;
+            semilogy(0:IID.NMAX, an_iid.P_le(:, c_), '--', 'Color', cc_(j_,:));
+            lg_ = [lg_, {sprintf('this run, s=%g', s_), sprintf('i.i.d., s=%g', s_)}]; %#ok<AGROW>
+        end
+        hold off;  xlabel('N');  ylabel('P(S \leq s)');  legend(lg_, 'FontSize', 7);  title('2-D run vs i.i.d. product');
+        nexttile;  lc_ = (an_iid.lamE(1:end-1) + an_iid.lamE(2:end))/2;  dlam_ = an_iid.lamE(2) - an_iid.lamE(1);
+        lg_ = {};
+        for i_ = 1:numel(an_iid.Nkeep)
+            p_ = an_iid.lamH(i_,:) / (an_iid.n * dlam_);  I_ = -log(p_) / an_iid.Nkeep(i_);  I_(p_ <= 0) = NaN;
+            plot(lc_, I_ - min(I_), '-');  hold on;  lg_{end+1} = sprintf('N = %d', an_iid.Nkeep(i_)); %#ok<AGROW>
+        end
+        aI_ = an_iid.summary(1);  vI_ = an_iid.summary(2);
+        plot(lc_, (lc_ - aI_).^2/(2*vI_), 'k--');  lg_{end+1} = 'log-normal';
+        yline(an_iid.summary(4), ':');  lg_{end+1} = 'decay of P(S \leq 2)';
+        hold off;  xlim([0 0.5]);  ylim([0 0.25]);  xlabel('\lambda = ln S / N');  ylabel('I(\lambda)');
+        legend(lg_, 'FontSize', 7);  title('rate function');
+        nexttile;
+        plot(an_iid.qs, an_iid.Lq(end,:), '-');  hold on;
+        if isfield(an_iid, 'Lq_diff'), plot(an_iid.qs, an_iid.Lq_diff, 'o-', 'MarkerSize', 3); end
+        plot(an_iid.TO_q, an_iid.TO_L, 'ks');
+        yline(-an_iid.summary(4), 'r--');  hold off;
+        xlabel('q');  ylabel('L(q)');  title('generalised Lyapunov exponents');
+        legend({sprintf('MC (1/N) ln E S^q, N = %d', an_iid.Nkeep(end)), 'MC, N 40\rightarrow60', ...
+                'transfer operator (vector norm)', '-I(0+)'}, 'FontSize', 7, 'Location', 'northwest');
+        sgtitle(sprintf('i.i.d. random-matrix model of the annealed kick (%g samples)', IID.NSAMP));
+    end
+
+    % (4E) metric rescaling
+    figure(FIG_OFFSET + 10440); clf;
+    set(gcf, 'Color', 'w', 'Name', '4E metric rescaling');
+    c2_ = SDIST.S_LIST == 2;
+    semilogy(an_Nv, an_Ple(:, c2_), 'k-', 'LineWidth', 1.5);  hold on;  lg_ = {'f = 1'};
+    for i_ = 1:an_nF
+        semilogy(an_Nv, squeeze(an_mPle(i_, :, c2_)), '-');  lg_{end+1} = sprintf('f = %g', SDIST.METRIC_F(i_)); %#ok<AGROW>
+    end
+    hold off;  xlabel('N');  ylabel('P(S_f \leq 2),  S_f = \sigma_{max}(D M D^{-1}), D = diag(1,f)');  legend(lg_);
+    title(sprintf('%s: threshold fractions move with the metric, decay rates should not', KICK_MODE));
+
+    % (4F) joint distribution of r and ln S on the lines
+    if ~isempty(an_joint)
+        figure(FIG_OFFSET + 10450); clf;
+        set(gcf, 'Color', 'w', 'Name', '4F r vs ln S');
+        tiledlayout(1, numel(an_joint), 'TileSpacing', 'compact');
+        for j_ = 1:numel(an_joint)
+            nexttile;  H_ = an_joint(j_).H.';  H_(H_ <= 0) = NaN;
+            imagesc(an_RB(1:end-1) + 0.125, an_SB(1:end-1) + 0.125, log10(H_));  set(gca, 'YDir', 'normal');
+            hold on;  plot([0 30], [0 30], 'r--');  xline(log(an_thr), 'w-');  yline(log(an_thr), 'w-');  hold off;
+            hi_ = max(4, 0.4*an_joint(j_).N);  xlim([-3 hi_]);  ylim([0 hi_]);
+            xlabel('r = ln|tangent|');  ylabel('ln S');
+            title(sprintf('N = %d: P(S\\leq2 | r\\leq ln2) = %.3f', an_joint(j_).N, an_joint(j_).P_lowS_given_lowr));
+        end
+        sgtitle(sprintf('%s: r vs ln S on the launched lines (dashed: ln S = r; S \\geq e^r always)', KICK_MODE));
+    end
+end
+
 %% -- save every statistics / summary figure of this mode to disk --
 % The per-cycle figures are saved as they are drawn (saved_cycle_figures/).
 % These summary figures used to exist only as open windows, so closing one
@@ -2720,7 +3488,27 @@ summaryFigs = { ...
     6801, 'blob_area_histogram_per_cycle';     ...
     6900, 'lagrangian_S_start_map';            ...
     6950, 'random_potential';                  ...
-    7001, 'final_S_field_blob_map'};
+    7001, 'final_S_field_blob_map';            ...
+    10100, 'branched_flow_rho_x_N';            ...
+    10110, 'manifold_phase_plane_snapshots';   ...
+    10120, 'caustic_count_vs_N';               ...
+    10130, 'rho_correlations_vs_N';            ...
+    10200, 'band_projections_x';               ...
+    10300, 'hazard_vs_age';                    ...
+    10310, 'kaplan_meier_F';                   ...
+    10320, 'pooled_age_bins_three_modes';      ...
+    10330, 'cohort_heat_map';                  ...
+    10340, 'depth_controlled_reentry_ratio';   ...
+    10350, 'hazards_modes_overlaid';           ...
+    10400, 'S_distribution_ridge';             ...
+    10401, 'S_distribution_heat_map';          ...
+    10402, 'S_quantile_fan';                   ...
+    10403, 'S_band_shares';                    ...
+    10410, 'lnS_collapse_test';                ...
+    10420, 'lognormal_tail_test';              ...
+    10430, 'iid_random_matrix_model';          ...
+    10440, 'metric_rescaling';                 ...
+    10450, 'r_vs_lnS_joint'};
 sumFolder = "saved_summary_figures";
 if ~isfolder(sumFolder)
     mkdir(sumFolder);
@@ -3158,7 +3946,7 @@ stats = struct('n_low', nnz(isLow), 'n_high', nnz(isHigh), ...
                'n_probes', nP, 'n_rejected', nnz(~ok));
 end
 
-function [Sfine_final, maskFine_final, Scoarse, maskC, ScoarsePrev] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P)
+function [Sfine_final, maskFine_final, Scoarse, maskC, ScoarsePrev, Smetric] = Sfield_snapshot(dp_x_hist, row0, Tau, H, W, t0, Nwin, P, metricF)
 % Stretching field S on a regular grid of FINAL (current) positions.
 %
 % Each grid point is integrated BACKWARD Nwin steps to its initial
@@ -3207,6 +3995,11 @@ Scoarse = nan(ny, nx);
 % consistency check, with no step-back, no wrap and no interpolation.
 wantPrev = (nargout >= 5);
 if wantPrev, ScoarsePrev = nan(ny, nx, 'single'); else, ScoarsePrev = []; end
+% Smetric (optional, Part 4E): sigma_max of D*M/D, D = diag(1, f), for each f in
+% metricF -- the same M in a metric where y is stretched by f. Read off the
+% same monodromy, so S itself is untouched.
+wantM = (nargout >= 6);
+if wantM, Smetric = nan(ny*nx, numel(metricF), 'single'); else, Smetric = []; end
 maskC   = false(ny, nx);
 Nw      = floor(Nwin);
 
@@ -3244,7 +4037,16 @@ for p0 = 1:blk:nTot
     % past DET_TOL, while S there is still exact to 0.0000%; testing it
     % would throw away good measurements for a rounding artefact.
     % Overflow is the one real failure mode and isfinite catches it.
-    if wantPrev
+    if wantM
+        [Sblk, SpBlk, M4] = S_at_final_positions(y, x, t0, Nw, dp_x_hist, Tau, row0);
+        ScoarsePrev(idx) = single(SpBlk);
+        for i_ = 1:numel(metricF)
+            f_  = metricF(i_);
+            tt_ = M4(:,1).^2 + (M4(:,2)/f_).^2 + (M4(:,3)*f_).^2 + M4(:,4).^2;
+            Smetric(idx, i_) = single((sqrt(tt_ + 2) + sqrt(max(tt_ - 2, 0))) / 2);
+        end
+        clear SpBlk M4 tt_
+    elseif wantPrev
         [Sblk, SpBlk] = S_at_final_positions(y, x, t0, Nw, dp_x_hist, Tau, row0);
         ScoarsePrev(idx) = single(SpBlk);
         clear SpBlk
@@ -3384,7 +4186,7 @@ fx=x-x0;
 dpy = dp_x(i0+1) + (dp_x(i1+1)-dp_x(i0+1))*fx;
 end
 
-function [S, Sprev] = S_at_final_positions(y, x, t0, Nw, dp_hist, Tau, row0)
+function [S, Sprev, M4] = S_at_final_positions(y, x, t0, Nw, dp_hist, Tau, row0)
 % S for points given by their FINAL (current) positions: integrate each point
 % BACKWARD Nw steps to its initial condition, then run the forward monodromy
 % along that orbit. Vectorised over a column of points.
@@ -3406,14 +4208,16 @@ for k = Nw-1 : -1 : 0
     y  = y - (d0 + (dp(mod(i0+1, n)+1) - d0) .* (x - xf));
 end
 
-if nargout >= 2
+if nargout >= 3
+    [S, ~, ~, Sprev, M4] = monodromy_S_vec(y, x, t0, Nw, dp_hist, Tau, row0);
+elseif nargout >= 2
     [S, ~, ~, Sprev] = monodromy_S_vec(y, x, t0, Nw, dp_hist, Tau, row0);
 else
     S = monodromy_S_vec(y, x, t0, Nw, dp_hist, Tau, row0);
 end
 end
 
-function [S, xN, yN, Sprev] = monodromy_S_vec(y0, x0, t0, N, dp_hist, Tau, row0)
+function [S, xN, yN, Sprev, M4] = monodromy_S_vec(y0, x0, t0, N, dp_hist, Tau, row0)
 % Exact monodromy by the chain rule, vectorised over a column of initial
 % conditions, returning sigma_max and the final positions. Replaces a
 % 5-trajectory central difference (base, +-eps in x, +-eps in y).
@@ -3520,6 +4324,9 @@ S  = (sqrt(t + 2) + sqrt(max(t - 2, 0))) / 2;
 
 xN = x;
 yN = y;
+if nargout >= 5
+    M4 = [a b c d];      % the monodromy itself, rows (x, y)
+end
 end
 
 function [nBlobs, areas] = blob_stats_any(BW, conn)
@@ -3802,4 +4609,325 @@ function save_cycle_figure(fig, plotName, cycle, kickMode)
 
     filename = sprintf("%s_%s_cycle_%02d.fig", plotName, kickMode, cycle);
     savefig(fig, fullfile(folder, filename));
+end
+
+% ==================== Parts 1, 2, 4: local functions (an_*) ====================
+
+function S = an_sigma(a, b, c, d)
+% sigma_max of [a b; c d] with det = 1, closed form (see monodromy_S_vec)
+t = a.*a + b.*b + c.*c + d.*d;
+S = (sqrt(t + 2) + sqrt(max(t - 2, 0))) / 2;
+end
+
+function L = an_line_new(x0, yrow)
+% a launched line of parcels at height yrow, each with M = I
+n = numel(x0);
+L.x = x0(:);  L.y = yrow*ones(n, 1);
+L.a = ones(n, 1);  L.b = zeros(n, 1);  L.c = zeros(n, 1);  L.d = ones(n, 1);
+end
+
+function L = an_line_step(L, dp, Tau, row0)
+% one kick-drift step, monodromy first -- the arithmetic of monodromy_S_vec
+dp = dp(:);  n = numel(dp);
+xf = floor(L.x);  i0 = mod(xf, n);
+d0 = dp(i0+1);  fp = dp(mod(i0+1, n)+1) - d0;
+g  = 1 + Tau*fp;
+a2 = g.*L.a + Tau*L.c;   b2 = g.*L.b + Tau*L.d;
+L.c = fp.*L.a + L.c;     L.d = fp.*L.b + L.d;
+L.a = a2;                L.b = b2;
+L.y = L.y + d0 + fp.*(L.x - xf);
+L.x = L.x + Tau*(L.y - row0);
+end
+
+function R = an_line_record(L, cols, dens, binw, thr)
+% per-cycle statistics of one launched line (Part 1A)
+nb  = round(cols / binw);
+S   = an_sigma(L.a, L.b, L.c, L.d);
+r   = 0.5*log(L.a.^2 + L.c.^2);           % rarefaction: ln of the tangent's length
+xm  = mod(L.x, cols);
+xb  = min(floor(xm / binw), nb-1) + 1;
+cnt = accumarray(xb, 1, [nb 1]);
+R.rho_hist = cnt / (dens*binw);           % rays per px per launched px
+[R.rho_a, R.caus_bin] = an_rho_from_a(L.x, L.a, binw, cols);
+R.ncaus    = nnz(L.a .* circshift(L.a, -1) < 0);
+R.mean_r   = mean(r);   R.var_r = mean((r - mean(r)).^2);
+R.mean_lnS = mean(log(S));
+R.corr_low = [NaN NaN];  R.corr_negr = [NaN NaN];
+ok = cnt >= 5;
+if nnz(ok) > 10
+    fl = accumarray(xb, double(S <= thr), [nb 1]);  fl = fl(ok) ./ cnt(ok);
+    nr = accumarray(xb, -r, [nb 1]);                nr = nr(ok) ./ cnt(ok);
+    rh = R.rho_hist(ok);
+    if std(fl) > 0, R.corr_low = [an_pearson(rh, fl), an_pearson(an_rank(rh), an_rank(fl))]; end
+    R.corr_negr = [an_pearson(rh, nr), an_pearson(an_rank(rh), an_rank(nr))];
+end
+R.S = S;  R.xm = xm;
+end
+
+function [rho, caus] = an_rho_from_a(xs, a, binw, cols)
+% Exact ray density at bin centres, rho = sum over branches of 1/|a|. Each
+% segment between neighbouring parcels is followed and every bin centre it
+% crosses gets 1/|a| interpolated at the crossing. A segment longer than two
+% bins is not resolved (the line folds between the samples): the bins it
+% spans are returned as NaN. caus marks bins next to a sign change of a.
+nb = round(cols / binw);
+x0 = xs(:);  x1 = circshift(x0, -1);
+a0 = a(:);   a1 = circshift(a0, -1);
+x1 = x1 + round((x0 - x1)/cols)*cols;     % nearest image on the ring
+lo = min(x0, x1);  hi = max(x0, x1);
+c0 = binw/2;
+mlo = floor((lo - c0)/binw) + 1;
+mhi = floor((hi - c0)/binw);
+ncr = max(mhi - mlo + 1, 0);
+longSeg = (hi - lo) > 2*binw;
+bad = an_mark_spans(mlo(longSeg) - 1, mhi(longSeg) + 1, nb);
+sel  = find(~longSeg & ncr > 0);
+reps = ncr(sel);
+seg  = repelem(sel, reps);
+offs = (0:sum(reps)-1).' - repelem(cumsum(reps) - reps, reps);
+m    = mlo(seg) + offs;
+xc   = c0 + m*binw;
+dx   = x1(seg) - x0(seg);
+tt   = (xc - x0(seg)) ./ dx;   tt(dx == 0) = 0.5;
+ac   = a0(seg) + tt.*(a1(seg) - a0(seg));
+rho  = accumarray(mod(m, nb) + 1, 1 ./ max(abs(ac), 1e-300), [nb 1]);
+cs   = (a0.*a1 < 0) & ~longSeg;
+caus = an_mark_spans(mlo(cs) - 1, mhi(cs) + 1, nb);
+rho(bad) = NaN;
+end
+
+function mark = an_mark_spans(lo, hi, nb)
+% bins of a ring of nb covered by any integer interval [lo, hi]
+mark = false(nb, 1);
+if isempty(lo), return; end
+if any(hi - lo + 1 >= nb), mark(:) = true; return; end
+lom = mod(lo(:), nb);  len = hi(:) - lo(:) + 1;
+d = accumarray([lom + 1; lom + len + 1], [ones(numel(lom),1); -ones(numel(lom),1)], [2*nb+1 1]);
+cv = cumsum(d);
+mark = (cv(1:nb) + cv(nb+1:2*nb)) > 0;
+end
+
+function r = an_pearson(u, v)
+u = u(:) - mean(u);  v = v(:) - mean(v);
+den = sqrt(sum(u.^2) * sum(v.^2));
+if den > 0, r = sum(u.*v) / den; else, r = NaN; end
+end
+
+function r = an_rank(v)
+% ranks with ties averaged (for Spearman's rho)
+[s, i] = sort(v(:));  n = numel(s);  r = zeros(n, 1);  k = 1;
+while k <= n
+    j = k;
+    while j < n && s(j+1) == s(k), j = j + 1; end
+    r(i(k:j)) = (k + j)/2;  k = j + 1;
+end
+end
+
+function m = an_nanmean(x)
+x = x(isfinite(x));
+if isempty(x), m = NaN; else, m = mean(x); end
+end
+
+function k = an_slope(x, y)
+ok = isfinite(x(:)) & isfinite(y(:));  k = NaN;
+if nnz(ok) >= 3
+    x = x(:);  y = y(:);  p = polyfit(x(ok), y(ok), 1);  k = p(1);
+end
+end
+
+function B = an_band_hist(x, S, cols, binw)
+% tracers per x bin in the bands S <= 2, 2 < S <= 5, S > 5 (Part 1B)
+nb = round(cols / binw);
+xb = min(floor(mod(x(:), cols) / binw), nb-1) + 1;
+bd = 1 + double(S(:) > 2) + double(S(:) > 5);
+B  = reshape(accumarray([bd, xb], 1, [3 nb]), [1 3 nb]);
+end
+
+function J = an_joint_record(N, r, lS, RB, SB, thr)
+% Part 4F: joint (r, ln S) histogram on the lines and the conditionals
+J.N = N;
+ir = discretize(r, RB);  is = discretize(lS, SB);  ok = ~isnan(ir) & ~isnan(is);
+J.H = accumarray([ir(ok), is(ok)], 1, [numel(RB)-1, numel(SB)-1]);
+lowS = lS <= log(thr);  lowr = r <= log(thr);
+q10 = an_quantile(r, 0.10);  r10 = r <= q10;
+J.P_lowS = mean(lowS);
+J.P_lowS_given_lowr = mean(lowS(lowr));
+J.P_lowr_given_lowS = mean(lowr(lowS));          % = 1 exactly: S >= e^r
+J.r_q10 = q10;
+J.P_lowS_given_r10 = mean(lowS(r10));
+J.P_r10_given_lowS = mean(r10(lowS));
+J.violations = nnz(lS < r - 1e-9);
+end
+
+function q = an_quantile(v, p)
+% quantiles with linear interpolation between order statistics (numpy default)
+v = sort(v(:));  n = numel(v);
+pos = p(:).'*(n-1) + 1;  lo = floor(pos);  hi = min(lo + 1, n);  fr = pos - lo;
+q = reshape(v(lo), 1, []).*(1 - fr) + reshape(v(hi), 1, []).*fr;
+end
+
+function R = an_sdist_row(S, Sf, SD)
+% Part 4A: one row of the distribution of S on the measured lattice
+S = double(S(:));  n = numel(S);
+l10 = log10(S);  lnS = log(S);
+R.n    = n;
+R.hist = histcounts(l10, SD.EDGES);
+R.over = nnz(l10 >= SD.EDGES(end));
+R.Ple  = mean(S <= SD.S_LIST, 1);
+m = mean(lnS);  z = lnS - m;  v = mean(z.^2);
+R.mom   = [m, v, mean(z.^3)/v^1.5, mean(z.^4)/v^2 - 3];
+R.quant = an_quantile(lnS, SD.QUANTS);
+bi = 1 + sum(S > SD.BANDS, 2);
+R.bshare = accumarray(bi, 1, [numel(SD.BANDS)+1 1]).' / n;
+nF = numel(SD.METRIC_F);
+R.mPle = nan(nF, numel(SD.S_LIST));  R.mHist = zeros(nF, numel(SD.EDGES)-1);  R.mMean = nan(nF, 1);
+for i = 1:nF
+    s = double(Sf(:, i));
+    R.mPle(i,:)  = mean(s <= SD.S_LIST, 1);
+    R.mHist(i,:) = histcounts(log10(s), SD.EDGES);
+    R.mMean(i)   = mean(log(s));
+end
+end
+
+function h = an_hazard(e, r, minRisk)
+h = e ./ r;  h(r < max(minRisk, 1)) = NaN;
+end
+
+function F = an_km(h)
+% Kaplan-Meier: F(k) = 1 - prod_{j<=k} (1 - h(j)); row k+1 holds age k
+F = nan(size(h));  s = 1;
+for k = 2:numel(h)
+    if ~isfinite(h(k)), break; end
+    s = s*(1 - h(k));  F(k) = 1 - s;
+end
+end
+
+function rr = an_mantel_haenszel(e1, r1, e0, r0)
+% Mantel-Haenszel rate ratio of group 1 over group 0 across strata
+T = r1 + r0;  ok = T > 0;
+rr = sum(e1(ok).*r0(ok)./T(ok)) / sum(e0(ok).*r1(ok)./T(ok));
+end
+
+function an_check(name, ok, detail)
+if ok, tag = 'PASS'; else, tag = 'FAIL'; end
+fprintf('    [%s] %s: %s\n', tag, name, detail);
+end
+
+function s = ternary_str(c, a, b)
+if c, s = a; else, s = b; end
+end
+
+function [counts, npc] = an_caustics_exact(dp_hist, Tau, row0, cols, yrow, Nmax, maxPieces)
+% Exact caustic count on a launched line, N = 0..Nmax. The kick is the
+% piecewise-linear interpolant of dp, so one step is affine inside every unit
+% cell of x and the line maps piecewise-affinely: a is constant on each piece.
+% Pieces (left end in launch and phase space, launch length, a, c) are cut
+% each step where their image crosses an integer x, then stepped exactly.
+% Caustics are the sign changes of a between consecutive pieces. Counts are
+% NaN once the piece budget is exceeded.
+n = cols;
+u = (0:n-1).';  Lp = ones(n,1);  x = u;  y = yrow*ones(n,1);  a = ones(n,1);  c = zeros(n,1);
+counts = nan(Nmax+1, 1);  npc = zeros(Nmax+1, 1);  counts(1) = 0;  npc(1) = n;
+for N = 1:min(Nmax, numel(dp_hist))
+    dp = dp_hist{N}(:);
+    xR = x + a.*Lp;
+    lo = min(x, xR);  hi = max(x, xR);
+    k0 = floor(lo) + 1;  k1 = ceil(hi) - 1;          % integers strictly inside
+    ncut = max(k1 - k0 + 1, 0);
+    tot  = sum(ncut) + numel(x);
+    if tot > maxPieces, return; end
+    reps = ncut + 1;
+    pid  = repelem((1:numel(x)).', reps);
+    j    = (0:tot-1).' - repelem(cumsum(reps) - reps, reps);
+    asc  = a(pid) >= 0;
+    kint = k1(pid) - j + 1;  kint(asc) = k0(pid(asc)) + j(asc) - 1;
+    xl   = kint;  j0 = j == 0;  xl(j0) = x(pid(j0));
+    ap   = a(pid);  ap(ap == 0) = 1;
+    sl   = (xl - x(pid)) ./ ap;  sl(j0) = 0;
+    last = j == reps(pid) - 1;
+    sr   = [sl(2:end); 0];  sr(last) = Lp(pid(last));
+    un   = u(pid) + sl;  Ln = sr - sl;
+    an   = a(pid);  cn = c(pid);
+    yn   = y(pid) + cn.*sl;
+    xm   = xl + 0.5*an.*Ln;
+    cel  = floor(xm);  i0 = mod(cel, n);
+    fp   = dp(mod(i0+1, n)+1) - dp(i0+1);
+    yn   = yn + dp(i0+1) + fp.*(xl - cel);
+    xn   = xl + Tau*(yn - row0);
+    a2   = (1 + Tau*fp).*an + Tau*cn;
+    c2   = fp.*an + cn;
+    keep = Ln > 0;
+    u = un(keep);  Lp = Ln(keep);  x = xn(keep);  y = yn(keep);  a = a2(keep);  c = c2(keep);
+    counts(N+1) = nnz(a .* circshift(a, -1) < 0);
+    npc(N+1) = numel(x);
+end
+end
+
+function R = an_iid_model(pool, Tau, IID, SD)
+% Part 4D: product of i.i.d. step Jacobians with fp drawn from the pooled
+% first differences of fresh kicks -- exactly what an annealed parcel sees
+% if successive kicks are independent of its position.
+Nm = IID.NMAX;  nS = numel(SD.S_LIST);  nch = ceil(IID.NSAMP / IID.CHUNK);
+cntP = zeros(Nm+1, nS);  s1 = zeros(Nm+1, 1);  s2 = zeros(Nm+1, 1);
+Nkeep = [20 40 60];  Nkeep = Nkeep(Nkeep <= Nm);
+qs = -4:0.25:4;  lse = -Inf(numel(Nkeep), numel(qs));
+lamE = linspace(0, 1, 401);  lamH = zeros(numel(Nkeep), 400);
+done = 0;  np = numel(pool);
+for ch = 1:nch
+    m = min(IID.CHUNK, IID.NSAMP - done);
+    a = ones(m,1);  b = zeros(m,1);  c = zeros(m,1);  d = ones(m,1);
+    cntP(1,:) = cntP(1,:) + m;
+    for N = 1:Nm
+        fp = pool(randi(np, m, 1));
+        g  = 1 + Tau*fp;
+        a2 = g.*a + Tau*c;  b2 = g.*b + Tau*d;  c = fp.*a + c;  d = fp.*b + d;  a = a2;  b = b2;
+        S  = an_sigma(a, b, c, d);
+        cntP(N+1,:) = cntP(N+1,:) + sum(S <= SD.S_LIST, 1);
+        lnS = log(S);  s1(N+1) = s1(N+1) + sum(lnS);  s2(N+1) = s2(N+1) + sum(lnS.^2);
+        kk = find(Nkeep == N);
+        if ~isempty(kk)
+            lamH(kk,:) = lamH(kk,:) + histcounts(lnS / N, lamE);
+            for qi = 1:numel(qs)
+                z = qs(qi)*lnS;  zm = max(z);
+                v = log(sum(exp(z - zm))) + zm;
+                mm = max(lse(kk,qi), v);
+                lse(kk,qi) = mm + log(exp(lse(kk,qi) - mm) + exp(v - mm));
+            end
+        end
+    end
+    done = done + m;
+end
+R.P_le = cntP / IID.NSAMP;
+R.meanlnS = s1 / IID.NSAMP;  R.varlnS = s2 / IID.NSAMP - R.meanlnS.^2;
+R.Nkeep = Nkeep;  R.qs = qs;  R.Lq = (lse - log(IID.NSAMP)) ./ Nkeep(:);
+R.lamE = lamE;  R.lamH = lamH;  R.n = IID.NSAMP;
+end
+
+function L = an_transfer_L(pool, Tau, qs, nth, nfp)
+% Generalised Lyapunov exponent of the VECTOR norm, L(q) = ln rho(T_q),
+% T_q f(theta) = E_fp[ |J u_theta|^q f(theta') ] on a grid of directions.
+% Equals the sigma_max exponent for q >= 0; for q < 0 sigma_max >= 1
+% saturates and this operator does not apply.
+e = linspace(min(pool), max(pool), nfp + 1);  w = histcounts(pool, e);
+fpv = (e(1:end-1) + e(2:end))/2;  w = w / sum(w);
+k = w > 0;  fpv = fpv(k);  w = w(k);  nf = numel(fpv);
+th = ((0:nth-1) + 0.5)*pi/nth;  ux = cos(th);  uy = sin(th);
+I = zeros(1, 2*nth*nf);  Jc = I;  NR = I;  LIN = I;  WF = I;
+for i = 1:nf
+    f  = fpv(i);
+    vx = (1 + Tau*f)*ux + Tau*uy;  vy = f*ux + uy;
+    nr = hypot(vx, vy);  tp = mod(atan2(vy, vx), pi);
+    pos = tp/(pi/nth) - 0.5;  j0 = floor(pos);  fr = pos - j0;
+    s = (i-1)*2*nth;
+    I(s+1:s+2*nth)   = [1:nth, 1:nth];
+    Jc(s+1:s+2*nth)  = [mod(j0, nth) + 1, mod(j0 + 1, nth) + 1];
+    NR(s+1:s+2*nth)  = [nr, nr];
+    LIN(s+1:s+2*nth) = [1 - fr, fr];
+    WF(s+1:s+2*nth)  = w(i);
+end
+L = nan(size(qs));
+for i = 1:numel(qs)
+    T = sparse(I, Jc, WF.*LIN.*NR.^qs(i), nth, nth);
+    L(i) = log(abs(eigs(T, 1)));
+end
 end
