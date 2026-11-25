@@ -5947,8 +5947,9 @@ if ~isempty(iMain)
         case 'quenched', ex = 'roughly 25 branches, median about 4 cycles';
         otherwise,       ex = 'no reference values';
     end
-    fprintf('  REPORT red band (threshold 2, MINLIFE %g): %d branches, median lifetime %.2f cycles  [reference: %s, at 60 cycles]\n', ...
-            BR.MINLIFE, s(1), s(2), ex);
+    fprintf(['  REPORT red band (threshold 2, MINLIFE %g, cycles 0-%d): %d branches, median lifetime %.2f cycles\n' ...
+             '         [reference: %s, from branches.py: cycles 0-40, material every 2 px in y, x not wrapped]\n'], ...
+            BR.MINLIFE, C, s(1), s(2), ex);
 end
 nP = nnz([res.pass]);  nF = numel(res) - nP;
 fprintf('BANDFIG checks: %d passed, %d failed.\n', nP, nF);
