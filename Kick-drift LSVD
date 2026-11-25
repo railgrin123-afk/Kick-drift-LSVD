@@ -100,6 +100,16 @@ if size(img0,3)==1, img0 = cat(3,img0,img0,img0); end
 if size(img0,3)==4, img0 = img0(:,:,1:3); end
 
 [rows, cols, ~] = size(img0);
+% ---- frame size: every pixel setting and the BANDFIG checks assume NFRAME ----
+% MATLAB shrinks the 12-inch starting figure on small screens, so
+% init_image.png can come out at e.g. 1726 px. Resample (nearest pixel) back
+% to the full frame. At NFRAME x NFRAME this does nothing.
+NFRAME = 1920;
+if rows ~= NFRAME || cols ~= NFRAME
+    warning('init_image.png is %dx%d; resampling to %dx%d.', rows, cols, NFRAME, NFRAME);
+    ri = round(linspace(1, rows, NFRAME)); ci = round(linspace(1, cols, NFRAME));
+    img0 = img0(ri, ci, :); [rows, cols, ~] = size(img0);
+end
 if mod(rows,2), img0 = img0(2:end,:,:); end
 if mod(cols,2), img0 = img0(:,2:end,:); end
 [rows, cols, ~] = size(img0);
@@ -408,7 +418,7 @@ end
 % model in 4D saves the generator state and restores it), changes no
 % existing variable or figure, and writes only new cycleData fields named
 % an_*. Every existing number and figure is therefore bit-identical with
-% AN.ENABLE on or off. New figures are 10100-10450 inside this mode's
+% AN.ENABLE on or off. New figures are 10110-10450 inside this mode's
 % FIG_OFFSET block and are saved with the other summary figures.
 %
 % Conventions: S = sigma_max(M) in closed form, S_THR = SParams.S_THR,
@@ -435,6 +445,51 @@ IID.NKICKS     = 500;     % fresh kicks pooled for the distribution of fp
 IID.NSAMP      = 1e7;     % parcels (in chunks of IID.CHUNK)
 IID.CHUNK      = 1e6;
 IID.NMAX       = 60;
+
+% ============ BANDS: where the red, green and blue material goes (BANDFIG) ============
+% Follows the material of the three coloured bands of the starting picture
+% forward and draws where it piles up and where it folds. Everything here
+% only READS the run: it uses each cycle's dp_x, img0 and the S-field already
+% measured, draws no random numbers, and changes no existing variable,
+% number or figure. Its figures are PNG only, saved_band_figures/<MODE_TAG>/.
+%
+% One band at a time:
+%   amount(x)   how much of the band lies in each BIN-px-wide vertical strip,
+%               divided by the amount there at cycle 0. 1 = evenly spread; the
+%               average over x is exactly 1 at every cycle (x is periodic, so
+%               nothing is lost). amount_low counts only the material with
+%               S <= S_THR, over the same cycle-0 denominator.
+%   caustic     a point of the band's centre line where a = M(1,1) = dx_N/dx_0
+%               changes sign between neighbouring points: the line is exactly
+%               vertical there and its projection onto x folds.
+%   cusp        the birth of a pair of caustics. During a drift
+%               a(t) = a + t*Tau*c is linear in t (the kick leaves a alone),
+%               so the moment a stretch of the line first reaches a = 0 is
+%               found exactly; the cusp is at cycle (N-1)+t.
+%   branch      a connected region (8-connectivity, x periodic) of the
+%               fine-time map where amount >= BRANCH.THR, lasting at least
+%               BRANCH.MINLIFE cycles.
+BANDFIG.ENABLE       = true;
+BANDFIG.CYCLES       = 'all';    % per-cycle figures A and B: 'all', or a list such as [1:5 8 10 13 20 30 40 60]
+BANDFIG.BIN          = 4;        % px per vertical strip of amount(x)
+BANDFIG.DX           = 0.5;      % band material: a point every DX px in x, across the whole width ...
+BANDFIG.DY           = 1;        % ... and every DY px in y, across the band's rows
+BANDFIG.LINE_DENS    = 32;       % centre-line points per px (caustics and cusps only)
+BANDFIG.MERGE_PX     = 0.5;      % sign changes of a closer than this (launch px) are one caustic
+BANDFIG.NSUB         = 20;       % in-between moments per cycle in the branch maps
+BANDFIG.ROWCAUS_UPTO = 3;        % caustics on EVERY material row are kept for cycles 1..this (checks)
+BANDFIG.FADE         = 0.35;     % fig B: the other two bands are drawn at this strength
+BANDFIG.PILE_THR     = 2;        % fig B: strips with amount >= this are shaded cyan
+BANDFIG.DIP_THR      = 0.25;     % fig B: strips with amount <= this are shaded orange
+BANDFIG.AMT_YLIM     = [0.05 60];
+BANDFIG.MAP_CLIM     = [0.05 50];
+BANDFIG.DPI_CYCLE    = 150;
+BANDFIG.DPI_SUMMARY  = 300;
+BANDFIG.FOLDER       = 'saved_band_figures';
+BRANCH.THR           = 2;        % branch: amount >= THR ...
+BRANCH.MINLIFE       = 1;        % ... for at least MINLIFE cycles
+BRANCH.THR_LIST      = [1.5 2 3];  % the branch statistics are repeated at these thresholds
+if ~exist('MODE_TAG', 'var'), MODE_TAG = KICK_MODE; end
 
 % ---- DOT colours, one per S band (see dot_band_index for the bands) ----
 % Hoisted out of the per-cycle loop: these are constants, and the zoom probe
@@ -773,6 +828,18 @@ if AN.ENABLE
             cols*LINE.CHK_DENS, SParams.FIELD_STEP);
 end
 
+% -------------------- BANDFIG: find the bands, seed their material --------------------
+if BANDFIG.ENABLE
+    bf = bandfig_setup(img0, rows, cols, cycles, BANDFIG);
+    bfFolder = fullfile(BANDFIG.FOLDER, MODE_TAG);
+    if ~isfolder(bfFolder), mkdir(bfFolder); end
+    if ischar(BANDFIG.CYCLES) && strcmpi(BANDFIG.CYCLES, 'all')
+        bfCycles = 1:cycles;
+    else
+        bfCycles = intersect(round(BANDFIG.CYCLES(:).'), 1:cycles);
+    end
+end
+
 % -------------------- KICK MODE: what each cycle applies --------------------
 % Placed after runMetadata.rngStateBeforeKicks is captured, so that field is
 % still the state before ANY kick in every mode.
@@ -1019,6 +1086,11 @@ for it = 1:cycles
                 an_nbL, LINE.BIN, an_thr, BRANCH.FRAC), [1 1 4 10]);
             clear tt_ S_ low_ ent_ ext_ o_ e_ k_ ev_ db_ rep_ g_
         end
+    end
+
+    % ---- BANDFIG: carry the three bands' material one cycle (reads dp_x only) ----
+    if BANDFIG.ENABLE
+        bf = bandfig_step(bf, dp_x, it, Tau, row0, cols, SParams.S_THR, BANDFIG);
     end
 
     % ---- warp for visualization (pullback) ----
@@ -1803,6 +1875,17 @@ for it = 1:cycles
         % does the same job on the lattice at 1/FIELD_STEP^2 the size.
         clear blueMask yellowMask
 
+    end
+
+    % ============ BANDFIG: per-cycle figures A (all bands) and B (one per band) ============
+    if BANDFIG.ENABLE && any(bfCycles == it)
+        bandfig_fig_amount(bf, it, BANDFIG, MODE_TAG, bfFolder, cols);
+        [bfPic_, bfY0_] = bandfig_pullback(img0, dp_x_hist, it, Tau, row0);
+        for bfk_ = 1:3
+            bandfig_fig_band(bf, bfk_, it, bfPic_, bfY0_, Sfine_final, maskFine_final, SParams, ...
+                             cmap_blue_yellow, BANDFIG, MODE_TAG, bfFolder);
+        end
+        clear bfPic_ bfY0_ bfk_
     end
 
     % ============ FIGURE: ZOOM PROBE GRIDS ============
@@ -3160,20 +3243,9 @@ if AN.ENABLE
     an_xc    = (0:an_nbL-1)*LINE.BIN + LINE.BIN/2;
     an_rowlab = {'row0 - rows/8', 'row0', 'row0 + rows/8'};
 
-    % (1A-i) branched flow: rho(x,N), log colour, one panel per launched row
-    figure(FIG_OFFSET + 10100); clf;
-    set(gcf, 'Color', 'w', 'Name', 'Branched flow rho(x,N)');
-    tiledlayout(1, an_nrow, 'TileSpacing', 'compact');
-    for r_ = 1:an_nrow
-        nexttile;
-        img_ = squeeze(an_rho_hist(r_,:,:));  img_(img_ <= 0) = NaN;
-        imagesc(an_xc, an_Nv, log10(img_));  set(gca, 'YDir', 'normal');  caxis([-1.5 1.7]);
-        xlabel('x (px)');  ylabel('cycle N');
-        title(sprintf('launch row %s (y_0 = %.0f)', an_rowlab{min(r_,3)}, LINE.ROWS(r_)));
-        colorbar;
-    end
-    sgtitle(sprintf('%s: projected ray density log_{10} \\rho(x,N), %d parcels/px, %d px bins', ...
-                    KICK_MODE, LINE.DENS, LINE.BIN));
+    % (1A-i) fig 10100 (branched flow rho(x,N), three parula panels for the
+    % launch rows row0 +- rows/8) is no longer drawn: the BANDFIG figures
+    % replace it. Its data is still saved, as an_lines.rho_hist.
 
     % (1A-ii) manifold in the phase plane, coloured by S, rho underneath
     if ~isempty(an_snap)
@@ -3543,6 +3615,16 @@ if AN.ENABLE
     end
 end
 
+%% ==================== BANDFIG: figures C and D, checks, save ====================
+if BANDFIG.ENABLE
+    bfOut = bandfig_finish(bf, BANDFIG, BRANCH, MODE_TAG, bfFolder, KICK_MODE, randomSeed, ...
+                           rows, cols, dp_x_hist{1}, Tau, SParams.S_THR);
+    cycleData.bandfig      = bfOut.save;
+    cycleData.bandfig_maps = bfOut.maps;     % fine-time maps, read by the other modes' comparison figure
+    fprintf('BANDFIG: figures in %s/, results saved to %s as bandfig and bandfig_maps.\n', bfFolder, matFileName);
+    clear bfOut
+end
+
 %% -- save every statistics / summary figure of this mode to disk --
 % The per-cycle figures are saved as they are drawn (saved_cycle_figures/).
 % These summary figures used to exist only as open windows, so closing one
@@ -3565,7 +3647,6 @@ summaryFigs = { ...
     6900, 'lagrangian_S_start_map';            ...
     6950, 'random_potential';                  ...
     7001, 'final_S_field_blob_map';            ...
-    10100, 'branched_flow_rho_x_N';            ...
     10110, 'manifold_phase_plane_snapshots';   ...
     10120, 'caustic_count_vs_N';               ...
     10130, 'rho_correlations_vs_N';            ...
@@ -5064,4 +5145,881 @@ function m = an_nanmean1(X)
 % column means ignoring NaN (NaN where a column has none)
 ok = isfinite(X);  X(~ok) = 0;
 m = sum(X, 1) ./ sum(ok, 1);
+end
+
+% ==================== BANDFIG: local functions (bandfig_*) ====================
+% The three coloured bands of the starting picture, followed forward. Every
+% function here only reads the run (dp_x_hist, img0, the S-field already
+% measured); none draws random numbers or writes an existing variable.
+
+function bf = bandfig_setup(img0, rows, cols, C, P)
+% Find the bands by colour, and seed each one's material and centre line.
+bf.band = bandfig_find_bands(img0);
+nb      = round(cols / P.BIN);
+bf.nb   = nb;
+bf.xc   = ((0:nb-1) + 0.5) * P.BIN;     % strip centres, px (x of the dynamics, 0-based)
+bf.C    = C;
+bf.amount     = nan(C+1, nb, 3);         % [cycle+1, strip, band]
+bf.amount_low = nan(C+1, nb, 3);
+bf.fine       = nan(C*P.NSUB + 1, nb, 3, 'single');   % NSUB moments per cycle
+bf.caus    = cell(C+1, 3);   % centre-line caustics per cycle: [x y launch_x]
+bf.cusps   = cell(1, 3);     % every cusp of the centre line: [time x y launch_x]
+bf.rowcaus = cell(C+1, 3);   % x of the caustics on EVERY row of the material (early cycles only)
+bf.n0      = zeros(nb, 3);
+bf.M = cell(1, 3);  bf.L = cell(1, 3);
+for k = 1:3
+    r  = bf.band(k).rows;                            % 1-based image rows
+    ys = ((r(1):P.DY:r(2)) - 1).';                   % 0-based y of the dynamics
+    xs = 0:P.DX:cols-P.DX;
+    [X, Y] = meshgrid(xs, ys);                       % [band row, point across]
+    np = numel(X);
+    bf.M{k} = struct('x', X(:), 'y', Y(:), 'a', ones(np,1), 'b', zeros(np,1), ...
+                     'c', zeros(np,1), 'd', ones(np,1), 'ny', numel(ys), 'nx', numel(xs));
+    yc = mean(r) - 1;                                % centre line, 0-based y
+    xl = (0:cols*P.LINE_DENS-1).' / P.LINE_DENS;
+    nl = numel(xl);
+    bf.band(k).yc = yc;
+    bf.L{k} = struct('x', xl, 'y', yc*ones(nl,1), 'a', ones(nl,1), 'b', zeros(nl,1), ...
+                     'c', zeros(nl,1), 'd', ones(nl,1));
+    bf.n0(:,k) = bandfig_hist(X(:), cols, P.BIN, nb);
+    bf.amount(1,:,k)     = 1;                        % by definition
+    bf.amount_low(1,:,k) = 1;                        % S = 1 for every point at cycle 0
+    bf.fine(1,:,k)       = 1;
+    bf.caus{1,k}    = zeros(0,3);
+    bf.cusps{k}     = zeros(0,4);
+    bf.rowcaus{1,k} = zeros(0,1);
+end
+fprintf(['BANDFIG: bands found by colour (1-based rows): red %d-%d, green %d-%d, blue %d-%d; ' ...
+         '%d material points per band, centre lines of %d points.\n'], ...
+        bf.band(1).rows, bf.band(2).rows, bf.band(3).rows, numel(bf.M{1}.x), numel(bf.L{1}.x));
+end
+
+function band = bandfig_find_bands(img0)
+% Row range of each coloured band: the longest run of rows that are mostly
+% that colour. Nothing is hard-coded, so a resampled or re-rendered starting
+% picture still finds its own bands.
+names = {'red', 'green', 'blue'};
+band  = struct('name', names, 'rgb', {[1 0 0], [0 1 0], [0 0 1]}, ...
+               'line', {[0.85 0 0], [0 0.62 0], [0 0 0.90]}, 'rows', {[], [], []}, 'yc', {[], [], []});
+R = img0(:,:,1);  G = img0(:,:,2);  B = img0(:,:,3);
+for k = 1:3
+    switch k
+        case 1, on = R > 0.5 & G < 0.5 & B < 0.5;
+        case 2, on = G > 0.5 & R < 0.5 & B < 0.5;
+        case 3, on = B > 0.5 & R < 0.5 & G < 0.5;
+    end
+    rowOn = mean(on, 2) > 0.5;
+    d = diff([0; double(rowOn(:)); 0]);
+    s = find(d == 1);  e = find(d == -1) - 1;
+    if isempty(s)
+        error('BANDFIG: no %s band found in img0 (no row is mostly %s).', names{k}, names{k});
+    end
+    [~, j] = max(e - s + 1);
+    band(k).rows = [s(j) e(j)];
+end
+end
+
+function h = bandfig_hist(x, cols, bin, nb, w)
+% material per BIN-px strip of x (x periodic); optional 0/1 weights
+j = floor(mod(x(:), cols) / bin) + 1;
+j(j > nb) = nb;  j(j < 1) = 1;           % mod can round up to cols exactly
+if nargin < 5
+    h = accumarray(j, 1, [nb 1]);
+else
+    h = accumarray(j, double(w(:)), [nb 1]);
+end
+end
+
+function [s, xPrev] = bandfig_map_step(s, dp, nk, Tau, row0)
+% One cycle of the map with its monodromy, M <- J*M: the same arithmetic as
+% the tracer block, so these are the same numbers.
+xf = floor(s.x);
+i0 = mod(xf, nk);
+d0 = dp(i0+1);
+fp = dp(mod(i0+1, nk)+1) - d0;
+g  = 1 + Tau*fp;
+a2 = g.*s.a + Tau*s.c;   b2 = g.*s.b + Tau*s.d;
+s.c = fp.*s.a + s.c;     s.d = fp.*s.b + s.d;
+s.a = a2;                s.b = b2;
+s.y = s.y + d0 + fp.*(s.x - xf);
+xPrev = s.x;                              % x during the kick (the kick moves only y)
+s.x = s.x + Tau*(s.y - row0);
+end
+
+function bf = bandfig_step(bf, dp, it, Tau, row0, cols, thr, P)
+% Carry every band's material and centre line through cycle it.
+dp = dp(:);
+nk = numel(dp);
+for k = 1:3
+    % ---- the band's material ----
+    s  = bf.M{k};
+    [s, xPrev] = bandfig_map_step(s, dp, nk, Tau, row0);
+    n0 = bf.n0(:,k);
+    for q = 1:P.NSUB                   % in-between moments of this cycle's drift
+        t = q / P.NSUB;
+        h = bandfig_hist(xPrev + t*Tau*(s.y - row0), cols, P.BIN, bf.nb);
+        bf.fine((it-1)*P.NSUB + q + 1, :, k) = single(h ./ n0).';
+    end
+    tt = s.a.^2 + s.b.^2 + s.c.^2 + s.d.^2;
+    S  = (sqrt(tt + 2) + sqrt(max(tt - 2, 0))) / 2;
+    bf.amount(it+1, :, k)     = (bandfig_hist(s.x, cols, P.BIN, bf.nb) ./ n0).';
+    bf.amount_low(it+1, :, k) = (bandfig_hist(s.x, cols, P.BIN, bf.nb, S <= thr) ./ n0).';
+    if it <= P.ROWCAUS_UPTO
+        bf.rowcaus{it+1, k} = bandfig_row_caustics(s, cols);
+    end
+    bf.M{k} = s;
+
+    % ---- the centre line: caustics at the end of the cycle, cusps during its drift ----
+    L  = bf.L{k};
+    a0 = L.a;                          % a at the start of the drift: the kick leaves a alone
+    [L, xPrevL] = bandfig_map_step(L, dp, nk, Tau, row0);
+    bf.caus{it+1, k} = bandfig_caustics(L.a, L.x, L.y, P.LINE_DENS, P.MERGE_PX, cols);
+    bf.cusps{k} = [bf.cusps{k}; bandfig_cusps(a0, L.a, xPrevL, L.y, it, P.LINE_DENS, P.MERGE_PX, cols, Tau, row0)];
+    bf.L{k} = L;
+end
+end
+
+function xs = bandfig_row_caustics(s, cols)
+% x of every sign change of a along each row of a band's material. Each row
+% is a closed loop in x (launch x and x + cols are the same point, shifted).
+A  = reshape(s.a, s.ny, s.nx);
+X  = reshape(s.x, s.ny, s.nx);
+nx = s.nx;
+nxt = [2:nx 1];
+Pz = A > 0;
+[r, c] = find(Pz ~= Pz(:, nxt));
+if isempty(r), xs = zeros(0,1); return; end
+c2 = nxt(c);  c2 = c2(:);
+i1 = sub2ind(size(A), r, c);  i2 = sub2ind(size(A), r, c2);
+x1 = X(i1);  x2 = X(i2) + cols*(c == nx);
+w  = A(i1) ./ (A(i1) - A(i2));
+xs = mod(x1 + w.*(x2 - x1), cols);
+end
+
+function [cid, ord] = bandfig_circ_clusters(k, n, dens, mergePx)
+% Group sorted indices k of a closed loop of n points: members closer than
+% mergePx (in launch px, dens points per px) share a group. ord lists the
+% members in loop order starting at a group boundary, so every group is one
+% contiguous block of ord.
+k = k(:);
+m = numel(k);
+gap = diff([k; k(1) + n]) / dens;        % from each member to the next, around the loop
+brk = gap >= mergePx;                    % a new group starts after k(j)
+if ~any(brk)
+    ord = (1:m).';  cid = ones(m, 1);  return;
+end
+j0  = find(brk, 1, 'last');
+ord = [(j0+1:m) (1:j0)].';
+cid = zeros(m, 1);
+cid(ord) = cumsum([1; double(brk(ord(1:end-1)))]);
+end
+
+function out = bandfig_caustics(a, x, y, dens, mergePx, cols)
+% Caustics of a centre line: a = M(1,1) = dx_N/dx_0 changes sign between two
+% neighbouring points (the line is vertical there). Sign changes closer than
+% mergePx of launch position are one caustic: the piecewise-linear kick makes
+% a flicker around 0 on flat stretches. out = [x y launch_x], x wrapped into
+% [0, cols), y not wrapped (0-based px).
+n   = numel(a);
+nxt = [2:n 1].';
+Pz  = a > 0;
+k   = find(Pz ~= Pz(nxt));
+if isempty(k), out = zeros(0,3); return; end
+[cid, ord] = bandfig_circ_clusters(k, n, dens, mergePx);
+co  = cid(ord);
+st  = find([true; diff(co) ~= 0]);
+en  = [st(2:end) - 1; numel(ord)];
+kk  = k(ord(floor((st + en) / 2)));      % the middle sign change of each group
+kp  = nxt(kk);
+w   = a(kk) ./ (a(kk) - a(kp));
+x2  = x(kp) + cols*(kk == n);
+out = [mod(x(kk) + w.*(x2 - x(kk)), cols), y(kk) + w.*(y(kp) - y(kk)), mod((kk - 1 + w)/dens, cols)];
+end
+
+function cu = bandfig_cusps(a0, a1, xPrev, y1, it, dens, mergePx, cols, Tau, row0)
+% Cusps born during cycle it's drift. The kick leaves a unchanged and the
+% drift adds t*Tau*c, so during the drift a(t) = a0 + t*(a1 - a0) exactly,
+% t in [0, 1]. A cusp is the birth of a pair of caustics: a run of points
+% whose a changes sign during this drift, lying in a stretch that had no
+% caustic at the start of the drift (so it ends with two). It is born at the
+% first t at which the smallest |a| of that run reaches 0, and at that point's
+% x at that moment. Points are followed by launch index, not by screen x.
+% cu = [time x y launch_x]: time = (it-1) + t in cycles; y is the row the
+% point sits on during the drift (0-based px, not wrapped).
+n  = numel(a0);
+fl = find((a0 > 0) ~= (a1 > 0));
+cu = zeros(0, 4);
+if isempty(fl), return; end
+nxt = [2:n 1].';
+s0  = a0 > 0;
+k0  = find(s0 ~= s0(nxt));                % caustics at the start of the drift
+w   = ceil(mergePx * dens);
+near = false(n, 1);                       % within mergePx of one: that caustic moving
+if ~isempty(k0)
+    idx = mod(bsxfun(@plus, k0(:), -w:(1+w)) - 1, n) + 1;
+    near(idx(:)) = true;
+end
+[cid, ord] = bandfig_circ_clusters(fl, n, dens, mergePx);
+co = cid(ord);
+st = find([true; diff(co) ~= 0]);
+en = [st(2:end) - 1; numel(ord)];
+for j = 1:numel(st)
+    m = fl(ord(st(j):en(j)));
+    if any(near(m)), continue; end
+    t = a0(m) ./ (a0(m) - a1(m));
+    t(~(t > 0 & t <= 1)) = Inf;
+    [tm, q] = min(t);
+    if ~isfinite(tm), continue; end
+    p = m(q);
+    cu(end+1, :) = [it-1+tm, mod(xPrev(p) + tm*Tau*(y1(p) - row0), cols), y1(p), mod((p-1)/dens, cols)]; %#ok<AGROW>
+end
+end
+
+function [pic, Y0] = bandfig_pullback(img0, dp_hist, N, Tau, row0)
+% The EXACT picture at cycle N: every pixel of the current frame is traced
+% back N steps to where its material was at cycle 0 and coloured from img0
+% there (bilinear, on the torus, as warp_image reads). Y0 is that starting y,
+% which says which band the pixel's material came from.
+%
+% Same closed-form inverse step as S_at_final_positions. Sfield_snapshot's
+% own backward pass is NOT reused: it goes back only Nw = min(Nwin, N)
+% steps, so past cycle Nwin it ends at cycle N - Nwin rather than at img0,
+% and above FIELD_STEP = 1 it does not visit every pixel.
+[H, W, ch] = size(img0);
+pic = zeros(H, W, ch);
+Y0  = zeros(H, W);
+blk = max(1, floor(5e5 / W));
+for r0 = 1:blk:H
+    r1 = min(H, r0 + blk - 1);
+    [xx, yy] = meshgrid(0:W-1, (r0:r1) - 1);
+    x = xx(:);  y = yy(:);
+    for k = N:-1:1
+        dp = dp_hist{k};  n = numel(dp);
+        x  = x - Tau*(y - row0);
+        xf = floor(x);
+        i0 = mod(xf, n);
+        d0 = dp(i0+1);
+        y  = y - (d0 + (dp(mod(i0+1, n)+1) - d0) .* (x - xf));
+    end
+    nr = r1 - r0 + 1;
+    Y0(r0:r1, :) = reshape(y, nr, W);
+    % bilinear read of img0 at (y, x), wrapped onto the torus
+    ys = mod(y, H);  xs = mod(x, W);
+    ys(ys >= H) = 0;  xs(xs >= W) = 0;       % mod can round up to H or W exactly
+    y0 = floor(ys);  x0 = floor(xs);
+    y1 = mod(y0 + 1, H);  x1 = mod(x0 + 1, W);
+    fy = ys - y0;  fx = xs - x0;
+    i00 = y0 + 1 + H*x0;  i01 = y0 + 1 + H*x1;
+    i10 = y1 + 1 + H*x0;  i11 = y1 + 1 + H*x1;
+    w00 = (1-fy).*(1-fx);  w01 = (1-fy).*fx;  w10 = fy.*(1-fx);  w11 = fy.*fx;
+    for c = 1:ch
+        Pc = img0(:,:,c);
+        v  = w00.*Pc(i00) + w01.*Pc(i01) + w10.*Pc(i10) + w11.*Pc(i11);
+        pic(r0:r1, :, c) = reshape(v, nr, W);
+    end
+end
+pic = min(max(pic, 0), 1);
+end
+
+function h = bandfig_strips(ax, xc, bin, mask, rgb, alpha, ylim)
+% shade the BIN-px strips where mask is true, as one patch per run of strips
+h = [];
+mask = logical(mask(:).');
+d  = diff([0 double(mask) 0]);
+s  = find(d == 1);  e = find(d == -1) - 1;
+if isempty(s), return; end
+x1 = xc(s) - bin/2;  x2 = xc(e) + bin/2;
+X  = [x1; x2; x2; x1];
+Y  = repmat([ylim(1); ylim(1); ylim(2); ylim(2)], 1, numel(s));
+h  = patch('Parent', ax, 'XData', X, 'YData', Y, 'FaceColor', rgb, 'FaceAlpha', alpha, ...
+           'EdgeColor', 'none');
+end
+
+function bandfig_cbar(cb, ticks, labels, txt)
+% colorbar ticks and label, in MATLAB and in Octave
+try
+    set(cb, 'Ticks', ticks, 'TickLabels', labels);
+catch
+    set(cb, 'YTick', ticks, 'YTickLabel', labels);
+end
+try
+    set(get(cb, 'Label'), 'String', txt);
+catch
+    ylabel(cb, txt);
+end
+end
+
+function bandfig_suptitle(f, txt)
+% a title over a whole figure (sgtitle without tiledlayout): centred text in
+% a hidden axes along the top edge
+ax = axes('Parent', f, 'Units', 'normalized', 'Position', [0 0.965 1 0.03], 'Visible', 'off', ...
+          'XLim', [0 1], 'YLim', [0 1]);
+text(ax, 0.5, 0.5, txt, 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle', ...
+     'FontWeight', 'bold', 'FontSize', 13, 'Interpreter', 'none');
+end
+
+function bandfig_save(f, folder, name, dpi)
+exportgraphics(f, fullfile(folder, name), 'Resolution', dpi);
+close(f);
+end
+
+function m = bandfig_cmap_bw(rgb, n)
+% black -> band colour -> white
+t = linspace(0, 1, n).';
+m = zeros(n, 3);
+lo = t <= 0.5;
+m(lo, :)  = (t(lo) / 0.5) * rgb;
+m(~lo, :) = repmat(rgb, nnz(~lo), 1) + ((t(~lo) - 0.5) / 0.5) * (1 - rgb);
+end
+
+function m = bandfig_magma(n)
+% the magma colour map (17 anchors, interpolated)
+A = [0.0015 0.0005 0.0139; 0.0396 0.0311 0.1335; 0.1131 0.0655 0.2768; ...
+     0.2117 0.0620 0.4186; 0.3167 0.0717 0.4854; 0.4147 0.1104 0.5047; ...
+     0.5128 0.1482 0.5076; 0.6136 0.1818 0.4985; 0.7164 0.2150 0.4753; ...
+     0.8169 0.2559 0.4365; 0.9043 0.3196 0.3881; 0.9609 0.4183 0.3596; ...
+     0.9867 0.5356 0.3822; 0.9961 0.6537 0.4462; 0.9969 0.7696 0.5349; ...
+     0.9924 0.8843 0.6401; 0.9871 0.9914 0.7495];
+m = interp1(linspace(0, 1, size(A,1)), A, linspace(0, 1, n));
+end
+
+function [tk, tl] = bandfig_logticks(lim)
+v  = [0.05 0.1 0.2 0.5 1 2 5 10 20 50 100];
+v  = v(v >= lim(1)*0.999 & v <= lim(2)*1.001);
+tk = log10(v);
+tl = arrayfun(@(z) sprintf('%g', z), v, 'UniformOutput', false);
+end
+
+function bandfig_fig_amount(bf, it, P, tag, folder, cols)
+% Figure A: amount(x) of the three bands at this cycle, with this cycle's
+% caustics (ticks) and the cusps born during it (stars).
+lo = P.AMT_YLIM(1);  hi = P.AMT_YLIM(2);
+f  = figure('Visible', 'off', 'Color', 'w', 'Units', 'pixels', 'Position', [40 40 1560 600]);
+ax = axes('Parent', f, 'Units', 'pixels', 'Position', [80 75 1100 455]);
+hold(ax, 'on');
+hl = [];
+for k = 1:3
+    hl = [hl, plot(ax, bf.xc, max(bf.amount(it+1, :, k), lo), '-', 'Color', bf.band(k).line, 'LineWidth', 1.3)]; %#ok<AGROW>
+end
+plot(ax, [0 cols], [1 1], 'k:', 'LineWidth', 1);
+tickY = lo * [1.05 1.22; 1.30 1.52; 1.62 1.90];        % one row of ticks per band
+starY = hi * [0.60 0.43 0.31];
+for k = 1:3
+    c = bf.caus{it+1, k};
+    if ~isempty(c)
+        nc = size(c, 1);
+        X  = [c(:,1).'; c(:,1).'; nan(1, nc)];
+        Y  = repmat([tickY(k,1); tickY(k,2); NaN], 1, nc);
+        plot(ax, X(:), Y(:), '-', 'Color', bf.band(k).line, 'LineWidth', 1.2);
+    end
+    cu = bf.cusps{k};
+    cu = cu(cu(:,1) > it-1 & cu(:,1) <= it, :);
+    if ~isempty(cu)
+        plot(ax, cu(:,2), starY(k)*ones(size(cu,1), 1), 'p', 'LineStyle', 'none', 'MarkerSize', 13, ...
+             'MarkerFaceColor', bf.band(k).rgb, 'MarkerEdgeColor', 'k');
+    end
+end
+hStar = plot(ax, NaN, NaN, 'p', 'LineStyle', 'none', 'MarkerSize', 12, ...
+             'MarkerFaceColor', [0.65 0.65 0.65], 'MarkerEdgeColor', 'k');
+hTick = plot(ax, NaN, NaN, '|', 'LineStyle', 'none', 'MarkerSize', 12, 'Color', [0.3 0.3 0.3], 'LineWidth', 1.2);
+set(ax, 'YScale', 'log', 'XLim', [0 cols], 'YLim', [lo hi], 'Box', 'on', 'Layer', 'top', 'FontSize', 10);
+xlabel(ax, 'x (px)');
+ylabel(ax, 'amount in the strip (1 = as at the start)');
+title(ax, sprintf('Cycle %d: amount of each band in each %d-px-wide vertical strip (1 = same as at the start)', ...
+                  it, P.BIN), 'FontSize', 12);
+lg = legend(ax, [hl hStar hTick], {'line: amount of the red band', 'line: amount of the green band', ...
+            'line: amount of the blue band', 'star: cusp born this cycle (band colour)', ...
+            'tick: caustic, band seen edge-on (band colour)'}, 'Location', 'northeast');
+set(lg, 'Units', 'pixels', 'Position', [1190 330 360 140], 'FontSize', 9);
+text(ax, 1.012, 0.0, sprintf('%s kicks', tag), 'Units', 'normalized', 'FontSize', 9, ...
+     'Color', [0.35 0.35 0.35], 'VerticalAlignment', 'bottom', 'Interpreter', 'none');
+bandfig_save(f, folder, sprintf('bands_amount_%s_cycle%03d.png', tag, it), P.DPI_CYCLE);
+end
+
+function bandfig_fig_band(bf, k, it, pic0, Y0, Sf, Mf, SP, cmapS, P, tag, folder)
+% Figure B: one band at one cycle. Top: the exact picture with the stretch
+% overlay of fig 4000, this band in full colour, the other two faded, its
+% piled-up material cyan, its caustics and new cusps marked. Bottom: its
+% amount(x) on the same x axis.
+[H, W, ~] = size(pic0);
+lo  = P.AMT_YLIM(1);  hi = P.AMT_YLIM(2);
+amt = bf.amount(it+1, :, k);
+pile = amt >= P.PILE_THR;
+dip  = amt <= P.DIP_THR;
+name = bf.band(k).name;
+
+% ---- which band each pixel's material started in (exact pullback) ----
+yy = Y0 + 1;                                            % 1-based start row
+own = false(H, W);  others = false(H, W);
+for q = 1:3
+    r = bf.band(q).rows;
+    inq = yy >= r(1) - 0.5 & yy <= r(2) + 0.5;
+    if q == k, own = inq; else, others = others | inq; end
+end
+colBin = min(floor((0:W-1) / P.BIN) + 1, bf.nb);
+cyanM  = bsxfun(@and, own, pile(colBin));               % this band, over a branch strip
+pic = pic0;
+cyan = [0 1 1];
+for c = 1:3
+    Pc = pic(:,:,c);
+    Pc(others) = 1 - P.FADE*(1 - Pc(others));
+    Pc(cyanM)  = cyan(c);
+    pic(:,:,c) = Pc;
+end
+clear own others cyanM yy
+if ~isempty(Sf)
+    % the stretch overlay of fig 4000: cmap_blue_yellow on log S over
+    % [1, S_CLIP_MAX], at opacity FIELD_ALPHA where S was measured, plus the
+    % white S = S_THR contour. The blend is done here, on the picture, rather
+    % than with an AlphaData layer, so the figure is the same in every
+    % renderer (Octave's printer ignores image AlphaData).
+    nC = size(cmapS, 1);
+    u  = log(max(double(Sf), 1)) / log(SP.S_CLIP_MAX);
+    ci = min(nC, floor(min(max(u, 0), 1) * nC) + 1);
+    ci(~isfinite(ci)) = 1;
+    al = SP.FIELD_ALPHA * double(Mf & isfinite(Sf));
+    for c = 1:3
+        pic(:,:,c) = (1 - al).*pic(:,:,c) + al.*reshape(cmapS(ci, c), H, W);
+    end
+    clear u ci al
+end
+
+f = figure('Visible', 'off', 'Color', 'w', 'Units', 'pixels', 'Position', [20 20 1320 1490]);
+axT = axes('Parent', f, 'Units', 'pixels', 'Position', [90 545 860 860]);
+image('Parent', axT, 'XData', [0 W-1], 'YData', [0 H-1], 'CData', pic);
+hold(axT, 'on');
+set(axT, 'YDir', 'reverse', 'DataAspectRatio', [1 1 1], 'XLim', [-0.5 W-0.5], 'YLim', [-0.5 H-0.5], ...
+    'Layer', 'top', 'FontSize', 10);
+if ~isempty(Sf)
+    contour(axT, 0:W-1, 0:H-1, double(Sf), [SP.S_THR SP.S_THR], 'w', 'LineWidth', 1.1);
+    % colour bar of the overlay, drawn as its own small axes
+    axC = axes('Parent', f, 'Units', 'pixels', 'Position', [965 545 18 860]);
+    image('Parent', axC, 'XData', [0 1], 'YData', [0 log10(SP.S_CLIP_MAX)], ...
+          'CData', reshape(cmapS, [], 1, 3));
+    sv = [1 1.5 2 3 5 10 15 20 50];  sv = sv(sv <= SP.S_CLIP_MAX);
+    set(axC, 'YDir', 'normal', 'XTick', [], 'YAxisLocation', 'right', 'XLim', [0 1], ...
+        'YLim', [0 log10(SP.S_CLIP_MAX)], 'YTick', log10(sv), ...
+        'YTickLabel', arrayfun(@(z) sprintf('%g', z), sv, 'UniformOutput', false), 'FontSize', 9);
+    ylabel(axC, sprintf('stretch S, shown at %g%% opacity (log scale); white line: S = %g', ...
+                        100*SP.FIELD_ALPHA, SP.S_THR));
+end
+bandfig_strips(axT, bf.xc, P.BIN, pile, [0.55 1 1], 0.20, [-0.5 H-0.5]);
+bandfig_strips(axT, bf.xc, P.BIN, dip,  [1 0.70 0.35], 0.20, [-0.5 H-0.5]);
+c = bf.caus{it+1, k};
+if ~isempty(c)
+    plot(axT, c(:,1), c(:,2), 'o', 'LineStyle', 'none', 'MarkerSize', 6, 'MarkerEdgeColor', 'k', ...
+         'MarkerFaceColor', 'none', 'LineWidth', 1.0);
+end
+cu = bf.cusps{k};
+cu = cu(cu(:,1) > it-1 & cu(:,1) <= it, :);
+if ~isempty(cu)
+    plot(axT, cu(:,2), cu(:,3), 'p', 'LineStyle', 'none', 'MarkerSize', 17, ...
+         'MarkerFaceColor', [1 0.92 0], 'MarkerEdgeColor', 'k', 'LineWidth', 1.1);
+end
+xlabel(axT, 'x (px)');  ylabel(axT, 'y (px)');
+title(axT, {sprintf('Cycle %d, %s band: the band''s material, where it piles up (cyan),', it, name), ...
+            'and where it folds (circles = caustics, stars = cusps)'}, 'FontSize', 12);
+
+% ---- bottom: amount(x) of this band ----
+axB = axes('Parent', f, 'Units', 'pixels', 'Position', [90 75 860 370]);
+hold(axB, 'on');
+hP = bandfig_strips(axB, bf.xc, P.BIN, pile, [0.55 1 1], 0.45, [lo hi]);
+hD = bandfig_strips(axB, bf.xc, P.BIN, dip,  [1 0.70 0.35], 0.45, [lo hi]);
+hA = plot(axB, bf.xc, max(amt, lo), '-', 'Color', bf.band(k).line, 'LineWidth', 1.4);
+hT = plot(axB, [-0.5 W-0.5], P.PILE_THR*[1 1], 'k--', 'LineWidth', 1);
+plot(axB, [-0.5 W-0.5], [1 1], 'k:', 'LineWidth', 1);
+set(axB, 'YScale', 'log', 'XLim', [-0.5 W-0.5], 'YLim', [lo hi], 'Box', 'on', 'Layer', 'top', 'FontSize', 10);
+% "upright here" over the tallest peaks, "flat and thin here" over the deepest dip
+pk = find(amt >= P.PILE_THR & amt >= [amt(end) amt(1:end-1)] & amt >= [amt(2:end) amt(1)]);
+[~, o] = sort(amt(pk), 'descend');  pk = pk(o);
+keep = [];
+for j = pk
+    if numel(keep) >= 3, break; end
+    if all(abs(bf.xc(j) - bf.xc(keep)) > 80), keep(end+1) = j; end %#ok<AGROW>
+end
+for j = keep
+    text(axB, bf.xc(j), amt(j)*1.35, 'upright here', 'FontSize', 8, 'FontWeight', 'bold', ...
+         'HorizontalAlignment', bandfig_halign(bf.xc(j), W), 'VerticalAlignment', 'bottom');
+end
+[mn, jd] = min(amt);
+if mn < 1
+    text(axB, bf.xc(jd), max(mn, lo)*2.8, 'flat and thin here', 'FontSize', 8, 'FontWeight', 'bold', ...
+         'HorizontalAlignment', bandfig_halign(bf.xc(jd), W), 'VerticalAlignment', 'bottom');
+end
+xlabel(axB, 'x (px)');
+ylabel(axB, sprintf('amount of the %s band in each %d-px strip', name, P.BIN));
+hC = plot(axB, NaN, NaN, 'o', 'LineStyle', 'none', 'MarkerSize', 6, 'MarkerEdgeColor', 'k', 'MarkerFaceColor', 'none');
+hS2 = plot(axB, NaN, NaN, 'p', 'LineStyle', 'none', 'MarkerSize', 12, 'MarkerFaceColor', [1 0.92 0], 'MarkerEdgeColor', 'k');
+hh = [hA, hT];
+ll = {sprintf('amount of the %s band (1 = as at the start)', name), ...
+      sprintf('branch threshold (amount = %g)', P.PILE_THR)};
+if ~isempty(hP), hh = [hh, hP]; ll{end+1} = sprintf('piles up here (amount >= %g)', P.PILE_THR); end
+if ~isempty(hD), hh = [hh, hD]; ll{end+1} = sprintf('deepest dips (amount <= %g)', P.DIP_THR); end
+hh = [hh, hC, hS2];
+ll = [ll, {'caustic: the band is vertical here', 'cusp: a fold is born here this cycle'}];
+lg = legend(axB, hh, ll, 'Location', 'northeast');
+set(lg, 'Units', 'pixels', 'Position', [962 240 350 190], 'FontSize', 9);
+text(axB, 1.012, 0.0, sprintf('%s kicks', tag), 'Units', 'normalized', 'FontSize', 9, ...
+     'Color', [0.35 0.35 0.35], 'VerticalAlignment', 'bottom', 'Interpreter', 'none');
+bandfig_save(f, folder, sprintf('band_%s_%s_cycle%03d.png', name, tag, it), P.DPI_CYCLE);
+end
+
+function a = bandfig_halign(x, W)
+if x < 0.08*W, a = 'left'; elseif x > 0.92*W, a = 'right'; else, a = 'center'; end
+end
+
+function bandfig_fig_stacked(bf, A, P, tag, folder, lowOnly, thr)
+% Figure C: amount(x, N) of each band, every cycle stacked, cycle 0 at the bottom.
+C = size(A, 1) - 1;
+clim = P.MAP_CLIM;
+[tk, tl] = bandfig_logticks(clim);
+f = figure('Visible', 'off', 'Color', 'w', 'Units', 'pixels', 'Position', [10 10 1900 980]);
+for k = 1:3
+    ax = axes('Parent', f, 'Units', 'pixels', 'Position', [70 + (k-1)*620, 90, 500, 760]);
+    imagesc(ax, bf.xc, 0:C, log10(max(A(:,:,k), clim(1))));
+    set(ax, 'YDir', 'normal', 'FontSize', 10);
+    colormap(ax, bandfig_cmap_bw(bf.band(k).rgb, 256));
+    caxis(ax, log10(clim));
+    cb = colorbar(ax);
+    bandfig_cbar(cb, tk, tl, 'amount in the strip (1 = as at the start)');
+    xlabel(ax, 'x (px)');  ylabel(ax, 'cycle');
+    nm = bf.band(k).name;  nm(1) = upper(nm(1));
+    title(ax, sprintf('%s band, every cycle stacked', nm), 'FontSize', 12);
+end
+if lowOnly
+    bandfig_suptitle(f, sprintf(['%s kicks: amount of each band in each %d-px strip, every cycle stacked ' ...
+                     '(cycle 0 at the bottom) - only the low-stretch material (S <= %g)'], tag, P.BIN, thr));
+    fn = sprintf('bands_stacked_low_stretch_%s_cycles000-%03d.png', tag, C);
+else
+    bandfig_suptitle(f, sprintf(['%s kicks: amount of each band in each %d-px strip, every cycle stacked ' ...
+                     '(cycle 0 at the bottom; 1 = as at the start)'], tag, P.BIN));
+    fn = sprintf('bands_stacked_%s_cycles000-%03d.png', tag, C);
+end
+bandfig_save(f, folder, fn, P.DPI_SUMMARY);
+end
+
+function [list, lab] = bandfig_branches(A, thr, minLife, xc, tt, cols)
+% Branches of a fine-time map A [time, strip]: connected regions
+% (8-connectivity, x periodic) where A >= thr, lasting at least minLife cycles.
+% list = [id, start time, end time, start x, peak amount], sorted by start;
+% lab = the same regions labelled by id.
+[T, nb] = size(A);
+CC = get_CC_full(A >= thr, 8);
+n  = numel(CC);
+lab0 = zeros(T, nb);
+for j = 1:n, lab0(CC{j}) = j; end
+% join regions that touch across x = 0 (8-connectivity)
+par = 1:n;
+for t = 1:T
+    l1 = lab0(t, nb);
+    if l1 == 0, continue; end
+    for t2 = max(1, t-1):min(T, t+1)
+        l2 = lab0(t2, 1);
+        if l2 == 0, continue; end
+        r1 = l1;  while par(r1) ~= r1, r1 = par(r1); end
+        r2 = l2;  while par(r2) ~= r2, r2 = par(r2); end
+        if r1 ~= r2, par(max(r1, r2)) = min(r1, r2); end
+    end
+end
+root = zeros(1, n);
+for j = 1:n
+    r = j;  while par(r) ~= r, r = par(r); end
+    root(j) = r;
+end
+rows_ = zeros(0, 5);  pix = {};
+for r = unique(root)
+    idx = vertcat(CC{root == r});
+    [ti, xi] = ind2sub([T nb], idx);
+    t0 = min(ti);  t1 = max(ti);
+    life = tt(t1) - tt(t0);
+    if life < minLife, continue; end
+    ang = 2*pi*xc(xi(ti == t0)) / cols;             % start x: circular mean
+    xs  = mod(atan2(mean(sin(ang)), mean(cos(ang))) * cols / (2*pi), cols);
+    rows_(end+1, :) = [0, tt(t0), tt(t1), xs, max(A(idx))]; %#ok<AGROW>
+    pix{end+1} = idx; %#ok<AGROW>
+end
+[~, o] = sort(rows_(:,2));
+list = rows_(o, :);
+list(:,1) = (1:size(list,1)).';
+lab = zeros(T, nb);
+for j = 1:numel(o), lab(pix{o(j)}) = j; end
+end
+
+function s = bandfig_branch_summary(list)
+if isempty(list)
+    s = [0 NaN NaN];
+else
+    life = list(:,3) - list(:,2);
+    s = [size(list,1), median(life), max(life)];
+end
+end
+
+function bandfig_draw_branch_map(ax, fine, xc, tt, list, lab, cu, clim, cmap)
+imagesc(ax, xc, tt, log10(max(double(fine), clim(1))));
+set(ax, 'YDir', 'normal', 'FontSize', 10);
+colormap(ax, cmap);  caxis(ax, log10(clim));
+hold(ax, 'on');
+if any(lab(:) > 0)
+    contour(ax, xc, tt, double(lab > 0), [0.5 0.5], 'c-', 'LineWidth', 0.9);
+end
+for j = 1:size(list, 1)
+    text(ax, list(j,4), list(j,2), sprintf('%d', list(j,1)), 'Color', 'c', 'FontSize', 7, ...
+         'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'top');
+end
+if ~isempty(cu)
+    plot(ax, cu(:,2), cu(:,1), 'p', 'LineStyle', 'none', 'MarkerSize', 6, ...
+         'MarkerFaceColor', [1 0.92 0], 'MarkerEdgeColor', 'k', 'LineWidth', 0.3);
+end
+set(ax, 'XLim', [0 xc(end) + (xc(2) - xc(1))/2], 'YLim', [0 tt(end)]);
+xlabel(ax, 'x (px)');  ylabel(ax, 'time (cycles)');
+end
+
+function bandfig_fig_branches(bf, brList, brLab, P, BR, tag, folder, tt)
+% Figure D: the fine-time maps with branches outlined and numbered, the cusps
+% as stars, and under each map the start cycle and lifetime of every branch.
+C = bf.C;
+clim = P.MAP_CLIM;
+[tk, tl] = bandfig_logticks(clim);
+mag = bandfig_magma(256);
+f = figure('Visible', 'off', 'Color', 'w', 'Units', 'pixels', 'Position', [10 10 1900 1460]);
+for k = 1:3
+    nm = bf.band(k).name;  nm(1) = upper(nm(1));
+    axM = axes('Parent', f, 'Units', 'pixels', 'Position', [70 + (k-1)*620, 480, 500, 840]);
+    bandfig_draw_branch_map(axM, bf.fine(:,:,k), bf.xc, tt, brList{k}, brLab{k}, bf.cusps{k}, clim, mag);
+    cb = colorbar(axM);
+    bandfig_cbar(cb, tk, tl, 'amount in the strip (1 = as at the start)');
+    title(axM, sprintf('%s band: %d in-between moments per cycle', nm, P.NSUB), 'FontSize', 12);
+    axS = axes('Parent', f, 'Units', 'pixels', 'Position', [70 + (k-1)*620, 70, 500, 320]);
+    L = brList{k};
+    s = bandfig_branch_summary(L);
+    if ~isempty(L)
+        scatter(axS, L(:,2), L(:,3) - L(:,2), 40, log10(L(:,5)), 'filled', 'MarkerEdgeColor', 'k');
+        colormap(axS, mag);
+        caxis(axS, log10([BR.THR max(BR.THR*1.01, max(L(:,5)))]));
+        cb2 = colorbar(axS);
+        [tk2, tl2] = bandfig_logticks([BR.THR max(L(:,5))]);
+        bandfig_cbar(cb2, tk2, tl2, 'peak amount');
+    end
+    set(axS, 'XLim', [0 C], 'Box', 'on', 'FontSize', 10);
+    grid(axS, 'on');
+    xlabel(axS, 'start (cycle)');  ylabel(axS, 'lifetime (cycles)');
+    title(axS, sprintf('%d branches, median lifetime %.1f, longest %.1f cycles', s(1), s(2), s(3)), 'FontSize', 11);
+end
+bandfig_suptitle(f, sprintf(['%s kicks: branches (cyan outline, numbered: amount >= %g for at least %g cycle) ' ...
+                 'and cusps (yellow stars), cycles 0-%d'], tag, BR.THR, BR.MINLIFE, C));
+bandfig_save(f, folder, sprintf('branches_and_cusps_%s_cycles000-%03d.png', tag, C), P.DPI_SUMMARY);
+end
+
+function bandfig_fig_compare(bf, P, BR, tag, folder, mode, cols)
+% Figure D, second part: the same map for each band in annealed and in
+% quenched side by side, when both are available (this run, or the other
+% mode's saved full_cycle_data_<mode>.mat).
+modes = {'annealed', 'quenched'};
+mp = cell(1, 2);
+for m = 1:2
+    if strcmp(modes{m}, mode)
+        mp{m} = struct('fine', bf.fine, 'xc', bf.xc, 'NSUB', P.NSUB, 'cusps', {bf.cusps});
+    else
+        fn = ['full_cycle_data_' modes{m} '.mat'];
+        if exist(fn, 'file') == 2
+            try
+                t_ = load(fn, 'bandfig_maps');
+                if isfield(t_, 'bandfig_maps'), mp{m} = t_.bandfig_maps; end
+            catch
+            end
+        end
+    end
+end
+if isempty(mp{1}) || isempty(mp{2}), return; end
+clim = P.MAP_CLIM;
+[tk, tl] = bandfig_logticks(clim);
+mag = bandfig_magma(256);
+for k = 1:3
+    nm = bf.band(k).name;  nmU = nm;  nmU(1) = upper(nmU(1));
+    f = figure('Visible', 'off', 'Color', 'w', 'Units', 'pixels', 'Position', [10 10 1300 1040]);
+    s = zeros(2, 3);  Cm = zeros(1, 2);
+    for m = 1:2
+        A  = double(mp{m}.fine(:,:,k));
+        tt = (0:size(A,1)-1).' / mp{m}.NSUB;
+        Cm(m) = round(tt(end));
+        [L, lab] = bandfig_branches(A, BR.THR, BR.MINLIFE, mp{m}.xc, tt, cols);
+        s(m,:) = bandfig_branch_summary(L);
+        ax = axes('Parent', f, 'Units', 'pixels', 'Position', [70 + (m-1)*630, 80, 520, 820]);
+        bandfig_draw_branch_map(ax, A, mp{m}.xc, tt, L, lab, mp{m}.cusps{k}, clim, mag);
+        cb = colorbar(ax);
+        bandfig_cbar(cb, tk, tl, 'amount in the strip (1 = as at the start)');
+        title(ax, sprintf('%s: %d branches, median lifetime %.1f, longest %.1f cycles', ...
+                          modes{m}, s(m,1), s(m,2), s(m,3)), 'FontSize', 11);
+    end
+    bandfig_suptitle(f, sprintf('%s band, annealed vs quenched kicks: branches (cyan, amount >= %g) and cusps (yellow stars)', ...
+                     nmU, BR.THR));
+    bandfig_save(f, folder, sprintf('branches_annealed_vs_quenched_%s_%s_cycles000-%03d.png', nm, tag, max(Cm)), ...
+                 P.DPI_SUMMARY);
+end
+end
+
+function res = bandfig_checks(bf, brSum, BR, mode, seed, rows, cols, dp1, Tau)
+% STEP 8 checks. PASS/FAIL lines; the reference values are for the annealed,
+% seed 0, 1920 x 1920 run, so those lines are skipped for any other run.
+res = struct('name', {}, 'pass', {}, 'detail', {});
+C  = bf.C;
+xc = bf.xc;
+ref = strcmp(mode, 'annealed') && seed == 0 && rows == 1920 && cols == 1920;
+fprintf('\n==================== BANDFIG checks (%s, seed %d, %dx%d, %d cycles) ====================\n', ...
+        mode, seed, rows, cols, C);
+fprintf('bands found: red rows %d-%d, green %d-%d, blue %d-%d (expected about 820-866, 960-1007, 1100-1147)\n', ...
+        bf.band(1).rows, bf.band(2).rows, bf.band(3).rows);
+
+% 1: amount averages to 1 at every cycle, every band
+err = 0;
+for k = 1:3, err = max(err, max(abs(mean(bf.amount(:,:,k), 2) - 1))); end
+res = bandfig_report(res, 'amount(x) averages to 1 within 1e-3 at every cycle, every band', err < 1e-3, ...
+                     sprintf('largest |mean - 1| = %.2e', err));
+
+% 2: red band, cycle 3: peaks of about 4 near x = 160, 720, 1530; a dip of about 0.2 near 1130
+if ref && C >= 3
+    a3 = bf.amount(4, :, 1);
+    for x0 = [160 720 1530]
+        w = abs(xc - x0) <= 40;  xw = xc(w);  [v, j] = max(a3(w));
+        res = bandfig_report(res, sprintf('red band, cycle 3: peak of about 4 near x = %d', x0), ...
+                             v >= 3.2 && v <= 4.8 && abs(xw(j) - x0) <= 25, ...
+                             sprintf('max %.2f at x = %.0f', v, xw(j)));
+    end
+    w = abs(xc - 1130) <= 40;  xw = xc(w);  [v, j] = min(a3(w));
+    res = bandfig_report(res, 'red band, cycle 3: dip of about 0.2 near x = 1130', ...
+                         v >= 0.1 && v <= 0.3 && abs(xw(j) - 1130) <= 25, sprintf('min %.2f at x = %.0f', v, xw(j)));
+else
+    fprintf('  SKIP  red band cycle-3 peaks/dip (reference values are for annealed, seed 0, 1920 frame, >= 3 cycles)\n');
+end
+
+% 3: red band: a cusp at x = 765 +- 10 px, time 2.44 +- 0.02 cycles
+if ref && C >= 3
+    cu = bf.cusps{1};
+    hit = abs(cu(:,2) - 765) <= 10 & abs(cu(:,1) - 2.44) <= 0.02;
+    [~, j] = min(abs(cu(:,2) - 765)/10 + abs(cu(:,1) - 2.44)/0.02);
+    if isempty(j), dt = 'no cusps at all'; else, dt = sprintf('nearest: x = %.1f, time %.3f', cu(j,2), cu(j,1)); end
+    res = bandfig_report(res, 'red band: a cusp at x = 765 +- 10 px, time 2.44 +- 0.02 cycles', any(hit), dt);
+else
+    fprintf('  SKIP  red band cusp at x = 765, t = 2.44 (reference run only)\n');
+end
+
+% 4: green band, cycle 3: amount about 1.7 near x = 262, and no caustic in 220-290 on any row
+if ref && C >= 3
+    g3 = bf.amount(4, :, 2);
+    w = abs(xc - 262) <= 15;  xw = xc(w);  [v, j] = max(g3(w));
+    res = bandfig_report(res, 'green band, cycle 3: amount about 1.7 near x = 262', v >= 1.5 && v <= 1.9, ...
+                         sprintf('max %.2f at x = %.0f', v, xw(j)));
+    xr = bf.rowcaus{4, 2};  xl = bf.caus{4, 2};
+    nr = nnz(xr >= 220 & xr <= 290);  nl = 0;
+    if ~isempty(xl), nl = nnz(xl(:,1) >= 220 & xl(:,1) <= 290); end
+    res = bandfig_report(res, 'green band, cycle 3: no caustic within x = 220-290 on any row of the band', ...
+                         nr == 0 && nl == 0, sprintf('%d on the %d material rows, %d on the centre line', ...
+                         nr, diff(bf.band(2).rows) + 1, nl));
+else
+    fprintf('  SKIP  green band cycle-3 checks (reference run only)\n');
+end
+
+% 5: no caustics anywhere at cycle 1
+if C >= 1
+    n1 = 0;
+    for k = 1:3, n1 = n1 + numel(bf.rowcaus{2, k}) + size(bf.caus{2, k}, 1); end
+    amin = 1 + Tau * min(diff([dp1(:); dp1(1)]));     % a after one cycle, over the whole plane
+    res = bandfig_report(res, 'no caustics anywhere at cycle 1', n1 == 0, ...
+                         sprintf(['%d on all band rows and centre lines; after one cycle a = 1 + Tau*f''(x0) ' ...
+                                  '>= %.3f everywhere in the plane'], n1, amin));
+end
+
+% 6: branch statistics (reported, not pass/fail)
+fprintf('Branch statistics (fine-time maps, %d moments per cycle, MINLIFE %g cycle):\n', ...
+        round((size(bf.fine, 1) - 1) / max(C, 1)), BR.MINLIFE);
+fprintf('    threshold   band    branches   median lifetime   longest\n');
+for i = 1:numel(BR.THR_LIST)
+    for k = 1:3
+        s = brSum(i, k, :);
+        fprintf('    %6.2f     %-6s  %6d      %8.2f         %8.2f\n', BR.THR_LIST(i), bf.band(k).name, s(1), s(2), s(3));
+    end
+end
+iMain = find(abs(BR.THR_LIST - 2) < 1e-12, 1);
+if ~isempty(iMain)
+    s = squeeze(brSum(iMain, 1, :));
+    switch mode
+        case 'annealed', ex = 'roughly 29 branches, median about 2 cycles';
+        case 'quenched', ex = 'roughly 25 branches, median about 4 cycles';
+        otherwise,       ex = 'no reference values';
+    end
+    fprintf('  REPORT red band (threshold 2, MINLIFE %g): %d branches, median lifetime %.2f cycles  [reference: %s, at 60 cycles]\n', ...
+            BR.MINLIFE, s(1), s(2), ex);
+end
+nP = nnz([res.pass]);  nF = numel(res) - nP;
+fprintf('BANDFIG checks: %d passed, %d failed.\n', nP, nF);
+if nF > 0
+    warning('BANDFIG: %d check(s) FAILED -- see the lines marked FAIL above.', nF);
+end
+end
+
+function res = bandfig_report(res, name, pass, detail)
+if pass, tag = 'PASS'; else, tag = 'FAIL'; end
+fprintf('  %s  %s  (%s)\n', tag, name, detail);
+res(end+1) = struct('name', name, 'pass', logical(pass), 'detail', detail);
+end
+
+function out = bandfig_finish(bf, P, BR, tag, folder, mode, seed, rows, cols, dp1, Tau, thr)
+% After the run: figures C and D, the branch statistics, the STEP 8 checks,
+% and what goes into the .mat file.
+C  = bf.C;
+tt = (0:C*P.NSUB).' / P.NSUB;                    % time of each row of the fine-time maps, cycles
+
+% ---- figure C: every cycle stacked; then only the low-stretch material ----
+bandfig_fig_stacked(bf, bf.amount,     P, tag, folder, false, thr);
+bandfig_fig_stacked(bf, bf.amount_low, P, tag, folder, true,  thr);
+
+% ---- branches, at every threshold in BRANCH.THR_LIST and at BRANCH.THR ----
+nT = numel(BR.THR_LIST);
+brAll = cell(nT, 3);  brSum = nan(nT, 3, 3);     % brSum: [threshold, band, (count, median, longest)]
+for i = 1:nT
+    for k = 1:3
+        brAll{i,k} = bandfig_branches(double(bf.fine(:,:,k)), BR.THR_LIST(i), BR.MINLIFE, bf.xc, tt, cols);
+        brSum(i,k,:) = reshape(bandfig_branch_summary(brAll{i,k}), 1, 1, 3);
+    end
+end
+brList = cell(1, 3);  brLab = cell(1, 3);
+for k = 1:3
+    [brList{k}, brLab{k}] = bandfig_branches(double(bf.fine(:,:,k)), BR.THR, BR.MINLIFE, bf.xc, tt, cols);
+end
+
+% ---- figure D, and the annealed / quenched comparison when both exist ----
+bandfig_fig_branches(bf, brList, brLab, P, BR, tag, folder, tt);
+bandfig_fig_compare(bf, P, BR, tag, folder, mode, cols);
+
+% ---- STEP 8 checks ----
+chk = bandfig_checks(bf, brSum, BR, mode, seed, rows, cols, dp1, Tau);
+
+% ---- STEP 9: what is saved ----
+s = struct();
+s.settings        = P;              % BANDFIG
+s.branch_settings = BR;             % BRANCH (THR, MINLIFE, THR_LIST; FRAC belongs to Part 1C)
+s.MODE_TAG        = tag;
+s.mode            = mode;
+s.seed            = seed;
+s.band            = bf.band;        % name, colour, rows (1-based image rows), yc (centre line, 0-based y)
+s.x_strip_centres = bf.xc;          % px, x of the dynamics (0-based)
+s.amount          = bf.amount;      % [cycle+1, strip, band]
+s.amount_low      = bf.amount_low;  % the same, only material with S <= S_THR
+s.caustics        = bf.caus;        % {cycle+1, band}: [x y launch_x] on the centre line
+s.cusps           = bf.cusps;       % {band}: [time x y launch_x]; time in cycles, (N-1)+t
+s.row_caustics_early = bf.rowcaus(1:min(C, P.ROWCAUS_UPTO)+1, :);   % x on every material row
+s.branches        = brList;         % {band}: [id, start time, end time, start x, peak amount] at BRANCH.THR
+s.branches_by_thr = brAll;          % {threshold, band}, thresholds BRANCH.THR_LIST
+s.branch_summary  = brSum;          % [threshold, band, (count, median lifetime, longest)]
+s.fine_time       = tt;             % time of each row of the fine-time maps (maps in bandfig_maps)
+s.checks          = chk;
+out.save = s;
+m = struct();
+m.fine  = bf.fine;                  % [time, strip, band], single
+m.xc    = bf.xc;
+m.NSUB  = P.NSUB;
+m.cusps = bf.cusps;
+m.mode  = mode;
+m.band  = bf.band;
+out.maps = m;
 end
