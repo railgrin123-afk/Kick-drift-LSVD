@@ -224,6 +224,28 @@ SParams.TRANS_ALPHA = 0.45;    % transparency for the magenta overlay
 % short runs where you want every cycle side by side.
 KEEP_FIGS_PER_CYCLE = false;
 
+% -------------------- CHECKPOINT / RESUME --------------------
+% A checkpoint holds everything the cycle loop carries from one cycle to the
+% next: every tracked parcel with its monodromy (tracers, launched lines, band
+% material, centre lines), the kick history, the random-number state, the
+% iterated picture and every accumulator -- the whole workspace except figure
+% handles and the cycleData file object. The per-cycle fields already written
+% to full_cycle_data_<mode>.mat are copied alongside it. So a run continued
+% from a checkpoint is the same run, bit for bit, as one run straight through.
+%   CHECKPOINT.EVERY = k   write checkpoint_<MODE_TAG>_cycleNN.mat after every
+%                          k-th cycle (0 = never), plus
+%                          checkpoint_<MODE_TAG>_cycleNN_results.mat (the copy)
+%   CHECKPOINT.KEEP  = n   keep only the n most recent checkpoints (Inf = all).
+%                          Each results copy is the full preallocated .mat file,
+%                          1-2 GB at 60 cycles, so keeping all of them adds up.
+%   RESUME_FROM = 'checkpoint_annealed_cycle10.mat'   continue that run from
+%                          the next cycle to its own `cycles` (set `cycles` and
+%                          KICK_MODE as in that run; anything else is checked).
+% Writing checkpoints changes no number: it only saves.
+CHECKPOINT.EVERY = 5;
+CHECKPOINT.KEEP  = 1;
+RESUME_FROM      = '';
+
 % -------------------- S-map params --------------------
 SParams.Nwin      = 13;        % target window length; early cycles auto smaller
 SParams.PITCH_YX  = [12 12];   % probe lattice spacing
@@ -876,7 +898,28 @@ end
 a_rms_cyc = nan(cycles,1);
 a_max_cyc = nan(cycles,1);
 
-for it = 1:cycles
+% -------------------- RESUME FROM A CHECKPOINT --------------------
+itStart = 1;
+if ~isempty(RESUME_FROM)
+    ckInfo_ = load(RESUME_FROM, 'ckpt_it_', 'ckpt_cycles_', 'ckpt_mode_', 'ckpt_results_');
+    if ckInfo_.ckpt_cycles_ ~= cycles || ~strcmp(ckInfo_.ckpt_mode_, KICK_MODE)
+        error(['RESUME_FROM: %s was written by a %s run of %d cycles; set KICK_MODE = ''%s'' ' ...
+               'and cycles = %d (a resumed run continues to the length it was started with).'], ...
+              RESUME_FROM, ckInfo_.ckpt_mode_, ckInfo_.ckpt_cycles_, ckInfo_.ckpt_mode_, ckInfo_.ckpt_cycles_);
+    end
+    ckOwn_ = struct('RESUME_FROM', RESUME_FROM, 'CHECKPOINT', CHECKPOINT);
+    load(RESUME_FROM);                 % every variable the loop carries, as it stood
+    RESUME_FROM = ckOwn_.RESUME_FROM;  % this run's own checkpoint settings
+    CHECKPOINT  = ckOwn_.CHECKPOINT;
+    rng(ckpt_rng_);                    % the random-number state after cycle ckpt_it_
+    copyfile(ckpt_results_, matFileName, 'f');   % per-cycle fields written so far
+    cycleData = matfile(matFileName, 'Writable', true);
+    itStart = ckpt_it_ + 1;
+    fprintf('Resumed from %s: continuing with cycle %d of %d.\n', RESUME_FROM, itStart, cycles);
+    clear ckInfo_ ckOwn_ ckpt_it_ ckpt_cycles_ ckpt_mode_ ckpt_rng_ ckpt_results_
+end
+
+for it = itStart:cycles
     % ---- this cycle's kick profile ----
     switch KICK_MODE
         case 'annealed', dp_x = K * randpot1d_four(cf_x);
@@ -1907,6 +1950,36 @@ for it = 1:cycles
             fprintf('  zoom %d: %d of %d probes in band (spacing %d px)\n', ...
                     wIdx, nKeptZ, nTotZ, spZ);
         end
+    end
+
+    % ---- CHECKPOINT after this cycle (saves only; changes nothing) ----
+    if CHECKPOINT.EVERY > 0 && mod(it, CHECKPOINT.EVERY) == 0 && it < cycles
+        ckpt_it_ = it;  ckpt_cycles_ = cycles;  ckpt_mode_ = KICK_MODE;  ckpt_rng_ = rng;
+        ckpt_file_    = sprintf('checkpoint_%s_cycle%02d.mat', MODE_TAG, it);
+        ckpt_results_ = sprintf('checkpoint_%s_cycle%02d_results.mat', MODE_TAG, it);
+        copyfile(matFileName, ckpt_results_, 'f');
+        ckpt_vars_ = who;
+        ckpt_skip_ = false(size(ckpt_vars_));
+        for ckpt_i_ = 1:numel(ckpt_vars_)
+            ckpt_v_ = eval(ckpt_vars_{ckpt_i_});
+            ckpt_skip_(ckpt_i_) = isa(ckpt_v_, 'matlab.graphics.Graphics') || ...
+                isa(ckpt_v_, 'matlab.io.MatFile') || strcmp(ckpt_vars_{ckpt_i_}, 'cycleData') || ...
+                any(strcmp(ckpt_vars_{ckpt_i_}, {'ckpt_v_', 'ckpt_vars_', 'ckpt_skip_', 'ckpt_i_', 'ckpt_file_'}));
+        end
+        clear ckpt_v_
+        save(ckpt_file_, ckpt_vars_{~ckpt_skip_}, '-v7.3');
+        fprintf('Checkpoint after cycle %d: %s and %s\n', it, ckpt_file_, ckpt_results_);
+        % keep only the CHECKPOINT.KEEP most recent checkpoints
+        ckpt_old_ = it - CHECKPOINT.KEEP * CHECKPOINT.EVERY;
+        if isfinite(CHECKPOINT.KEEP) && ckpt_old_ >= 1
+            ckpt_del_ = {sprintf('checkpoint_%s_cycle%02d.mat', MODE_TAG, ckpt_old_), ...
+                         sprintf('checkpoint_%s_cycle%02d_results.mat', MODE_TAG, ckpt_old_)};
+            for ckpt_i_ = 1:2
+                if isfile(ckpt_del_{ckpt_i_}), delete(ckpt_del_{ckpt_i_}); end
+            end
+        end
+        clear ckpt_it_ ckpt_cycles_ ckpt_mode_ ckpt_rng_ ckpt_file_ ckpt_results_ ckpt_vars_ ...
+              ckpt_skip_ ckpt_i_ ckpt_old_ ckpt_del_
     end
 end
 
